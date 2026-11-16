@@ -481,16 +481,23 @@ window.__ModuleLoader__.load({
         // `betterSidebar` is optional (third-party service), so the native
         // registry injection is the one that must resolve; the better-sidebar one
         // only exists to notice a LATE arrival and hand the tab over.
+        let tabsScope = null;
         ctx.inject(['sidebarRightTabs'], (scope) => {
+          tabsScope = scope;
           sync(scope);
           return () => {
+            tabsScope = null;
             if (channel === 'native') teardown();
           };
         });
         ctx.inject(['betterSidebar'], (scope) => {
           sync(scope);
           return () => {
-            if (channel === 'better') teardown();
+            if (channel !== 'better') return;
+            teardown();
+            // better-sidebar unloaded: fall back to the native channel instead of
+            // leaving the pane gone until the next reload.
+            if (tabsScope !== null) sync(tabsScope);
           };
         });
       },

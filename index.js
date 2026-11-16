@@ -321,8 +321,14 @@ function maskArgv(argv) {
   return out.join(' ');
 }
 
-function bounded(text, limit = MAX_OUTPUT) {
-  const value = String(text || '');
+/** Mask header values that ghd may echo back in error output. */
+function maskSecrets(text) {
+  return String(text)
+    .replace(/(-H|--header)\s+("[^"]*"|'[^']*'|\S+)/g, '$1 <redacted>')
+    .replace(/((?:Authorization|Cookie|Set-Cookie|X-Api-Key)\s*:\s*)[^\r\n]+/gi, '$1<redacted>');
+}
+
+function bounded(text, limit = MAX_OUTPUT) {  const value = String(text || '');
   return value.length <= limit ? value : `${value.slice(0, limit)}\n[... truncated ${value.length} chars]`;
 }
 
@@ -645,6 +651,8 @@ export function apply(ctx, config) {
       render: (_args, value) => {
         const v = value && typeof value === 'object' ? value : {};
         const lines = [];
+        // A degraded call (e.g. "waited but no task id") must be visible to the model.
+        if (v.warning) lines.push(`⚠ ${v.warning}`);
         const timedOut = Boolean(v.timedOut || v.waited?.timedOut);
         const ids = Array.isArray(v.taskIds) && v.taskIds.length > 0 ? v.taskIds : (v.taskId ? [v.taskId] : []);
         const statuses = Array.isArray(v.statuses) ? v.statuses : [];
@@ -662,9 +670,12 @@ export function apply(ctx, config) {
           // The task state is the verdict, not the exit code: a failed or paused
           // download must never read as success.
           lines.push(`下载未成功${timedOut ? '（等待超时）' : ''}${statusText}`);
+          if (ids.length > 0) {
+            lines.push(`已提交的任务仍在后台下载：${ids.join(', ')}；完成或失败时会自动通知本会话。`);
+          }
           lines.push(`ghd ${v.command}`);
           lines.push(JSON.stringify(v.error ?? null, null, 2));
-          if (v.raw) lines.push(bounded(v.raw, MAX_ERROR_RAW));
+          if (v.raw) lines.push(bounded(maskSecrets(v.raw), MAX_ERROR_RAW));
         }
         return [{ type: 'text', text: bounded(lines.join('\n')) }];
       },
@@ -687,6 +698,10 @@ export function apply(ctx, config) {
       const urls = Array.isArray(args?.urls) ? args.urls.filter((u) => typeof u === 'string' && u.trim() !== '') : [];
       if (urls.length === 0) throw new Error('ghost_download requires at least one URL.');
       if (urls.length > MAX_URLS) throw new Error(`ghost_download accepts at most ${MAX_URLS} links per call.`);
+      // A leading dash would be parsed as a ghd switch, not a URL.
+      for (const url of urls) {
+        if (url.startsWith('-')) throw new Error(`URL must not start with "-": ${url}`);
+      }
       const select = typeof args.select === 'string' && args.select.trim() !== '' ? args.select.trim() : undefined;
       const name = typeof args.name === 'string' && args.name.trim() !== '' ? args.name.trim() : undefined;
       // ghd answers a multi-URL --select/--name with a bare usage error; say it here.
@@ -706,13 +721,13 @@ export function apply(ctx, config) {
       }
 
       const submitted = await call(argv, { timeoutMs: ADD_TIMEOUT_MS, signal: exec.signal });
-      // `ghd add` reports per-item failures inside a successful envelope, so a
-      // partial batch still has tasks that are really downloading. Deriving ids
-      // from the whole payload used to drop them all when any one item failed.
-      const accepted = submitted.ok && Array.isArray(submitted.result)
+      // `ghd add` reports per-item failures inside one envelope: a partial batch
+      // still has tasks that are really downloading, so ids are derived from the
+      // accepted items regardless of the envelope-level ok flag.
+      const accepted = Array.isArray(submitted.result)
         ? submitted.result.filter((item) => item === null || typeof item !== 'object' || !item.error)
-        : submitted.result;
-      const taskIds = submitted.ok ? findTaskIds(accepted) : [];
+        : [];
+      const taskIds = findTaskIds(accepted);
       const waitSeconds = Number.isInteger(args.waitSeconds) ? args.waitSeconds : 0;
 
       if (!submitted.ok || waitSeconds <= 0 || taskIds.length === 0) {
@@ -757,14 +772,18 @@ export function apply(ctx, config) {
       const detailValue = detailResults.length === 1
         ? (detailResults[0].result ?? detailResults[0].error)
         : detailResults.map((result) => (result.ok ? result.result : { error: result.error }));
-      // `ghd wait` exits 0 only when every task completed, so both halves matter.
-      const ok = waited.ok && !waited.timedOut && allCompleted && detailResults.every((result) => result.ok);
+      // The task states are the verdict: a deadline that killed `ghd wait` after
+      // the last task finished must not read as a failure.
+      const allDetailOk = detailResults.every((result) => result.ok);
+      const ok = allCompleted && allDetailOk;
       // An explicit verdict keeps the failure renderer from printing `null`.
       const failure = ok ? undefined : {
-        code: waited.timedOut ? 'waitTimedOut' : 'notCompleted',
-        message: waited.timedOut
-          ? `waited ${Math.min(waitSeconds, DEFAULT_WAIT_LIMIT_SECONDS)}s and the tasks were still active`
-          : `downloads did not all complete (${statuses.join(', ') || 'no status reported'})`,
+        code: allCompleted ? 'detailUnavailable' : (waited.timedOut ? 'waitTimedOut' : 'notCompleted'),
+        message: allCompleted
+          ? `all tasks completed but a task detail could not be read (${statuses.join(', ') || 'no status reported'})`
+          : waited.timedOut
+            ? `waited ${Math.min(waitSeconds, DEFAULT_WAIT_LIMIT_SECONDS)}s and the tasks were still active`
+            : `downloads did not all complete (${statuses.join(', ') || 'no status reported'})`,
         statuses,
       };
       return {
@@ -926,6 +945,8 @@ export function apply(ctx, config) {
     async execute(args, exec) {
       const taskId = typeof args?.taskId === 'string' ? args.taskId.trim() : '';
       if (!taskId) throw new Error('ghost_task requires taskId.');
+      // A leading dash or unknown shape would be parsed as a ghd switch.
+      if (!TASK_ID.test(taskId)) throw new Error(`Invalid task id: ${taskId}`);
       return call(['task', taskId], { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
     },
   });
@@ -954,6 +975,7 @@ export function apply(ctx, config) {
       if (!['pause', 'start', 'remove'].includes(action)) throw new Error(`Unsupported action "${String(action)}".`);
       const ids = Array.isArray(args?.taskIds) ? args.taskIds.filter((id) => typeof id === 'string' && id.trim() !== '') : [];
       if (ids.length === 0) throw new Error('ghost_control requires at least one task id.');
+      for (const id of ids) if (!TASK_ID.test(id)) throw new Error(`Invalid task id: ${id}`);
       return call([action, ...ids], { timeoutMs: CONTROL_TIMEOUT_MS, signal: exec.signal });
     },
   });
@@ -983,6 +1005,7 @@ export function apply(ctx, config) {
     async execute(args, exec) {
       const ids = Array.isArray(args?.taskIds) ? args.taskIds.filter((id) => typeof id === 'string' && id.trim() !== '') : [];
       if (ids.length === 0) throw new Error('ghost_wait requires at least one task id.');
+      for (const id of ids) if (!TASK_ID.test(id)) throw new Error(`Invalid task id: ${id}`);
       const limit = Number.isInteger(args.timeoutSeconds)
         ? Math.min(Math.max(args.timeoutSeconds, 1), DEFAULT_WAIT_LIMIT_SECONDS)
         : 600;
@@ -1040,7 +1063,7 @@ export function apply(ctx, config) {
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (!blockShellDownloads) return next();
     const name = String(exec?.name || '');
-    if (!/bash|shell|pwsh|powershell|exec|terminal/i.test(name)) return next();
+    if (!/bash|shell|pwsh|powershell|exec|terminal|download/i.test(name)) return next();
     const args = exec?.arguments;
     // `ops_bash` separates an inline command from a prepared script path.
     const candidates = [args?.command, args?.script, args?.script_path];
