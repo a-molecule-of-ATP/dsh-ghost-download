@@ -1,0 +1,12 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="5" y="4" width="26" height="28" rx="7" fill="url(#ghd-body)" />
+  <path d="M18 10.2v9.6" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" />
+  <path d="M13.6 15.8 18 20.4l4.4-4.6" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M11.4 24.6h13.2" stroke="#FFFFFF" stroke-opacity="0.85" stroke-width="2.6" stroke-linecap="round" />
+  <defs>
+    <linearGradient id="ghd-body" x1="7" y1="4" x2="29" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5AB0F5" />
+      <stop offset="1" stop-color="#1F6FD0" />
+    </linearGradient>
+  </defs>
+</svg>

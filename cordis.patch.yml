@@ -1,0 +1,3 @@
+- insert:
+    - id: ghost-download
+      name: '@local/dsh-ghost-download'

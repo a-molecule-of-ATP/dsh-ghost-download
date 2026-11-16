@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Ghost Downloader 下载",
+    "description": "把 DSH 的所有下载任务交给本机的 Ghost Downloader（通过官方 ghd 命令行工具），和你桌面端的任务共用同一个队列。可以让智能体下载链接（HTTP/HTTPS、FTP、磁力/BT、HLS、DASH、eD2k）、列出队列、查看单个任务详情、暂停/继续/移除任务，或者等下载完成后再继续。默认提交后立即返回，下载结束时插件会把结果主动送回当前会话；需要当场拿到文件时可以让它同步等待。同时会拦截 curl -o / curl -O / wget 这类绕过 Ghost 的 shell 下载。使用前提：已在 Ghost Downloader 的「设置 → 命令行工具」安装 ghd（Ghost 未运行时 ghd 会自动拉起）；可在本插件配置里用 ghdPath 指定可执行文件路径；关闭本插件后这些工具即被移除。"
+  }
+}

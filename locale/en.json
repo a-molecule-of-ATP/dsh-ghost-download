@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Ghost Downloader",
+    "description": "Hand every download to Ghost Downloader through its official ghd CLI, so DSH and your desktop share one queue. Ask the agent to download a link (HTTP/HTTPS, FTP, magnet/BT, HLS, DASH, eD2k), list the queue, inspect one task, pause / resume / remove tasks, or wait until a download finishes before continuing. By default a submission returns immediately, and the plugin reports the outcome back to the session when the download stops; ask to wait when the next step needs the file right away. Shell downloads that would bypass Ghost (curl -o, curl -O, wget) are blocked and redirected to ghost_download. Requires the ghd command line tool installed from Ghost Downloader's Settings → Command line tools (ghd starts Ghost itself when it is not running); set ghdPath in this plugin's config to point at another executable; turning the plugin off removes the tools."
+  }
+}
