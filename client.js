@@ -740,12 +740,17 @@ window.__ModuleLoader__.load({
 
         h('section', { key: 'behaviour', style: CARD }, [
           h('p', { key: 't', style: CARD_TITLE }, '行为'),
-          h('p', { key: 'd', style: CARD_DESC }, '决定是否拦截其他下载方式。'),
-          h('div', { key: 'box', style: ROWS },
+          h('p', { key: 'd', style: CARD_DESC }, '决定是否拦截其他下载方式，以及后台通知里暴露多少信息。'),
+          h('div', { key: 'box', style: ROWS }, [
             switchRow('block', '拦截 curl -o / wget',
               '把这些 shell 下载改道到 ghost_download，避免绕过队列。',
               draft.blockShellDownloads !== false,
-              (value) => update({ blockShellDownloads: value }), true)),
+              (value) => update({ blockShellDownloads: value }), true),
+            switchRow('notice', '完成通知附带文件路径',
+              '关闭后通知里只显示文件名，路径不出现在会话记录里；智能体需要时再用 ghost_task 查。',
+              draft.noticeIncludePath !== false,
+              (value) => update({ noticeIncludePath: value })),
+          ]),
         ]),
 
         h('div', { key: 'footer', style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 18 } }, [

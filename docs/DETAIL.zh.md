@@ -63,6 +63,8 @@
 {"urls": ["https://example.com/big.iso"], "precheck": true}
 ```
 
+预检只是建议，不会自动跳过。它依赖 `ghd probe` 返回文件尺寸——**若 ghd 没给出尺寸，空间与同名判定会被标注成「未检查」而不是当成通过**。传 `useGhostFolder` 时落点由 Ghost 决定，本次无法预检目标目录。
+
 失败后重试全部 failed 任务（`retry` 不传 `taskIds` 时表示所有失败任务）：
 
 ```json
@@ -79,11 +81,11 @@
 
 - 插件会拦截 `curl -o` / `curl -O` / `wget` 这类绕过 Ghost 的 shell 下载，并引导改用 `ghost_download`。
 - `allowedUrlSchemes` 是协议白名单，默认允许 http、https、ftp、magnet、ed2k；不在名单里的链接直接拒绝。
-- `ghost_control` 的 `remove` 会删除任务；加上 `deleteFiles: true` 还会删除该任务已产生的文件，属于破坏性操作。可用 `controlRemoveEnabled` 设置在插件页关闭 remove。
+- `ghost_control` 的 `remove` 会移除任务，并删掉它**尚未完成**的文件；只有再加 `deleteFiles: true` 才会连已完成文件一起删。可用 `controlRemoveEnabled` 设置在插件页关闭 remove。
 - `headers` 会进入 `ghd` 的命令行参数，本机进程列表可见；不要把敏感凭据写在这里。
 
 ## 诊断
 
-下载不通、任务总是失败时，先跑 `ghost_doctor`：它只读检查 `ghd --version`、`ghd tasks`、一个已知小文件的网络/证书探测、下载目录是否可写，以及 Ghost 自己的 `UserConfig.json` 里的下载目录与代理设置。`ghost_task` 会对失败原因给出「可能原因」式的归因（证书、DNS、鉴权、资源不存在、范围请求等）。
+下载不通、任务总是失败时，先跑 `ghost_doctor`：它检查 `ghd --version`、`ghd tasks`、一个已知小文件的网络/证书探测、下载目录是否可写，以及 Ghost 自己的 `UserConfig.json` 里的下载目录与代理设置。**它不碰下载队列**，但并非零副作用——会在下载目录写入并立即删除一个临时探测文件，并对外发起一次网络请求。`ghost_task` 会对失败原因给出「可能原因」式的归因（证书、DNS、鉴权、资源不存在、范围请求等）。
 
 `ghost_stats` 只统计**当前可见**的任务：Ghost 不保留下载历史，它的 `range` 参数（7d/30d/all）只是接口一致的占位，并不能真的按时间过滤，也不会伪造一份账本。

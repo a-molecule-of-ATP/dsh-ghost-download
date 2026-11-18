@@ -63,6 +63,11 @@ Precheck free space and same-named files before submitting (a report only, never
 {"urls": ["https://example.com/big.iso"], "precheck": true}
 ```
 
+A precheck is advice, never an automatic skip. It depends on `ghd probe` reporting a
+file size — **when Ghost reports none, the space and same-name checks are labelled
+"not checked" rather than treated as passing**. With `useGhostFolder` the
+destination belongs to Ghost, so there is no target folder to precheck.
+
 Retry every failed task (`retry` with no `taskIds` means all failed tasks):
 
 ```json
@@ -84,6 +89,6 @@ By default a submission returns immediately with the task ids, and the plugin ke
 
 ## Diagnostics
 
-When downloads fail or tasks keep erroring, run `ghost_doctor` first: it read-only checks `ghd --version`, `ghd tasks`, a network/certificate probe against a known small file, writability of the download folder, and Ghost's own `UserConfig.json` download folder and proxy settings. `ghost_task` gives a hedged "possible cause" attribution for failures (certificate, DNS, auth, gone, range request, etc.).
+When downloads fail or tasks keep erroring, run `ghost_doctor` first: it checks `ghd --version`, `ghd tasks`, a network/certificate probe against a known small file, writability of the download folder, and Ghost's own `UserConfig.json` download folder and proxy settings. It never touches the download queue, but it is not side-effect free: it writes and immediately deletes a temporary probe file and makes one network request. `ghost_task` gives a hedged "possible cause" attribution for failures (certificate, DNS, auth, gone, range request, etc.).
 
 `ghost_stats` only aggregates **currently visible** tasks: Ghost keeps no download history, so its `range` parameter (7d/30d/all) is a placeholder for API consistency and cannot actually filter by time — no ledger is invented.

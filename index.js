@@ -170,6 +170,9 @@ const TOOL_OUTPUT_SCHEMA = {
     filePath: { type: 'string' },
     stillRunning: { type: 'boolean' },
     cached: { type: 'boolean' },
+    /** Untrimmed count when a `limit` shortened `result`; declared because the
+     *  schema forbids extra properties, so omitting it rejects the whole output. */
+    total: { type: 'integer' },
     precheck: {},
     attribution: {},
     waited: {},
@@ -690,10 +693,14 @@ export function apply(ctx, config) {
   /** Reject a link whose scheme the row does not allow, naming the usable ones. */
   const assertSchemeAllowed = (url, allowed) => {
     const scheme = schemeOf(url);
-    if (scheme !== '' && allowed.includes(scheme)) return;
+    // The configured list arrives from the settings page, a hand-edited profile row,
+    // or the schema default, and only the page lowercases it. Compare case-blind so
+    // `["HTTP"]` in a YAML file cannot reject every https link.
+    const normalized = (Array.isArray(allowed) ? allowed : []).map((entry) => String(entry).trim().toLowerCase());
+    if (scheme !== '' && normalized.includes(scheme)) return;
     const shown = scheme === '' ? '无法识别的链接' : `${scheme}:`;
     throw new Error(
-      `不支持的协议 ${shown}（${url}）。当前允许的协议：${allowed.join(', ')}`
+      `不支持的协议 ${shown}（${url}）。当前允许的协议：${normalized.join(', ')}`
         + '。可在本插件设置的「安全 → 允许的协议」里调整。',
     );
   };
@@ -1104,7 +1111,15 @@ export function apply(ctx, config) {
       const first = history[0];
       const last = history[history.length - 1];
       const elapsed = (last.at - first.at) / 1000;
-      if (elapsed <= 0 || last.received < first.received) return null;
+      if (elapsed <= 0) return null;
+      if (last.received < first.received) {
+        // A retry or a re-download restarts the byte counter. Keeping the old
+        // samples would report `null` speed until they age out of the window, so
+        // drop them and start a fresh measurement from this sample.
+        history.length = 0;
+        history.push({ at: now, received });
+        return null;
+      }
       return Math.max(0, Math.round((last.received - first.received) / elapsed));
     };
     const readQueue = async () => {
@@ -1313,7 +1328,11 @@ export function apply(ctx, config) {
       // so defaulting to it would hand the agent a file it cannot read afterwards.
       // `useGhostFolder` opts out and lets Ghost apply its own category rules.
       let dir = typeof args.dir === 'string' ? args.dir.trim() : '';
-      if (dir === '' && args.useGhostFolder !== true) dir = workspaceDownloads(ctx, exec);
+      // `useGhostFolder` is the explicit "let Ghost decide" request, so it wins
+      // over a `dir` passed in the same call: honouring `dir` would silently
+      // ignore the flag the caller asked for.
+      if (args.useGhostFolder === true) dir = '';
+      else if (dir === '') dir = workspaceDownloads(ctx, exec);
       if (dir !== '') argv.push('-o', dir);
       // A same-named existing file is kept by default; overwriting is opt-in.
       if (args.conflict === 'overwrite') argv.push('--conflict', 'overwrite');
@@ -1331,8 +1350,14 @@ export function apply(ctx, config) {
       let precheckReport;
       if (args.precheck === true) {
         const reasons = [];
-        const checkDir = dir !== '' ? dir : (args.useGhostFolder === true ? workspaceDownloads(ctx, exec) : dir);
+        // With `useGhostFolder` there is no target folder this side can name, so
+        // space and same-name checks would describe the wrong destination. Say so
+        // instead of reporting a check that does not apply.
+        const checkDir = dir;
         const freeBytes = checkDir !== '' ? freeBytesOf(checkDir) : undefined;
+        if (checkDir === '') {
+          reasons.push('落点由 Ghost 决定（useGhostFolder），因此没有检查目标目录的空间与同名文件。');
+        }
         const samples = [];
         for (const url of urls) {
           // A magnet:/ed2k: link may need a torrent to resolve a name/size; if the
@@ -1365,7 +1390,7 @@ export function apply(ctx, config) {
             }
           }
         }
-        if (freeBytes === undefined) reasons.push('目标目录剩余空间未检查（无法获取 statfs 或未指定可写目录）。');
+        if (checkDir !== '' && freeBytes === undefined) reasons.push('目标目录剩余空间未检查（无法获取 statfs 或未指定可写目录）。');
         // Decision is a report, not a gate: "blocked"/"skip"/"warn" is advisory.
         const decision = reasons.some((r) => r.includes('空间') && r.includes('不足'))
           ? 'blocked'
@@ -1600,8 +1625,13 @@ export function apply(ctx, config) {
           else other.push(task);
         }
         const lines = [
-          `共 ${list.length} 个任务：运行中 ${running.length} / 已完成 ${completed.length}`
-          + ` / 已暂停 ${paused.length} / 失败 ${failed.length} / 其他 ${other.length}`,
+          // `total` is the untrimmed count; without it a `limit` would report the
+          // queue as shorter than it is and hide the tasks that were cut.
+          v.total !== undefined && v.total !== list.length
+            ? `显示 ${list.length} / 共 ${v.total} 个任务：运行中 ${running.length} / 已完成 ${completed.length}`
+              + ` / 已暂停 ${paused.length} / 失败 ${failed.length} / 其他 ${other.length}`
+            : `共 ${list.length} 个任务：运行中 ${running.length} / 已完成 ${completed.length}`
+              + ` / 已暂停 ${paused.length} / 失败 ${failed.length} / 其他 ${other.length}`,
         ];
         const block = (label, items) => {
           if (items.length === 0) return;
@@ -1713,7 +1743,7 @@ export function apply(ctx, config) {
           enum: controlActions(),
           description: `Operation to perform. One of: ${controlActions().join(', ')}.`,
         },
-        taskIds: { type: 'array', items: { type: 'string' }, description: 'One or more task ids, for example ["tsk_0123"]. Omit for retry to mean every failed task.' },
+        taskIds: { type: 'array', items: { type: 'string' }, description: 'One or more task ids, for example ["tsk_0123"]. Omit only for retry, where omission means every failed task; pause, start and remove require at least one id.' },
         deleteFiles: {
           type: 'boolean',
           description: 'remove only: also delete the files the task already produced. '
@@ -1899,10 +1929,13 @@ export function apply(ctx, config) {
 
   ctx.tools.register({
     name: 'ghost_doctor',
-    description: 'Run a read-only health check of the Ghost Downloader integration: '
+    description: 'Run a health check of the Ghost Downloader integration: '
       + 'ghd availability, a live `ghd tasks` call, a network/certificate probe against a known small file, '
       + 'writability of the session downloads folder, and a cross-check with Ghost\'s own UserConfig.json '
-      + '(download folder and proxy). Returns { checks: [{ name, ok, detail, hint }] }. No side effects on downloads.',
+      + '(download folder and proxy). Returns { checks: [{ name, ok, detail, hint }] }. '
+      + 'It never touches the download queue, but it is not side-effect free: it writes and immediately '
+      + 'deletes a temporary probe file in the downloads folder, and it makes one network request to a '
+      + 'small public file to test connectivity.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
     output: {
       schema: {
@@ -2005,6 +2038,8 @@ export function apply(ctx, config) {
           '该项只读，失败不影响下载；可手动检查 %LOCALAPPDATA%\\GhostDownloader\\UserConfig.json。');
       } else {
         const parts = [];
+        // This check answers one question — "is Ghost pointed at the same folder the
+        // plugin would use?" — so a mismatch is a real finding, not a pass.
         let ok = true;
         if (userConfig.downloadFolder) {
           parts.push(`下载目录=${userConfig.downloadFolder}`);
@@ -2012,6 +2047,7 @@ export function apply(ctx, config) {
           // so the user is not surprised the files land outside the workspace.
           if (dir !== '' && path.resolve(userConfig.downloadFolder) !== path.resolve(dir)) {
             parts.push('与插件默认下载目录不同');
+            ok = false;
           }
         } else {
           parts.push('下载目录未设置');
