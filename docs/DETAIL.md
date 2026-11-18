@@ -41,7 +41,7 @@ Same-named files are kept by default (keep); overwriting requires an explicit `c
 └── ... (the agent can read these files directly)
 ```
 
-When to use `useGhostFolder: true`: when you want Ghost to file downloads by its own category rules and do not mind the files landing outside the workspace (for example, purely for the user to pick up in the desktop app). The trade-off is that the agent can no longer read them — pass `dir` when you need them back.
+When to use `useGhostFolder: true`: when you want Ghost to file downloads by its own category rules and do not mind the files landing outside the workspace (for example, purely for the user to pick up in the desktop app). **If both are passed, `useGhostFolder` wins and `dir` is ignored.** The trade-off is that the agent can no longer read them — pass `dir` when you need them back.
 
 ## Typical usage
 

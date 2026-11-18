@@ -1,6 +1,6 @@
 <svg width="1280" height="520" viewBox="0 0 1280 520" fill="none" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, 'Cascadia Mono', 'Courier New', monospace">
   <!-- left: Ghost's own folder -->
-  <rect x="80" y="72" width="520" height="248" rx="16" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <rect x="80" y="72" width="520" height="248" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
   <text x="108" y="112" font-size="15" fill="#8b93a7">Ghost folder</text>
   <text x="108" y="158" font-size="17" fill="#dfe4ee">C:\Users\&lt;you&gt;\Downloads</text>
   <rect x="108" y="184" width="240" height="42" rx="21" fill="#3a1f27" stroke="#e0556a" stroke-width="2" />
@@ -9,7 +9,7 @@
   <text x="108" y="290" font-size="13" fill="#6b7a99">→ useGhostFolder: true</text>
 
   <!-- right: session workspace -->
-  <rect x="680" y="72" width="520" height="248" rx="16" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <rect x="680" y="72" width="520" height="248" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
   <text x="708" y="112" font-size="15" fill="#8b93a7">session workspace</text>
   <text x="708" y="158" font-size="17" fill="#dfe4ee">&lt;cwd&gt;/downloads</text>
   <rect x="708" y="184" width="228" height="42" rx="21" fill="#17301f" stroke="#4cc38a" stroke-width="2" />
