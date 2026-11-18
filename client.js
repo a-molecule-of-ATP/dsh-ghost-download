@@ -480,12 +480,8 @@ window.__ModuleLoader__.load({
       'watchLimitMinutes',
       'maxOutputChars',
       'maxErrorChars',
-      'defaultDownloadDir',
-      'defaultConflict',
-      'defaultHeaders',
       'allowedUrlSchemes',
       'controlRemoveEnabled',
-      'waitToolDefaultSeconds',
       'noticeIncludePath',
     ];
 
@@ -497,32 +493,6 @@ window.__ModuleLoader__.load({
         return left.length === right.length && left.every((item, index) => item === right[index]);
       }
       return a === b;
-    }
-
-    /** One "Name: value" per line, blank lines and duplicates dropped. */
-    function linesToHeaders(text) {
-      const out = [];
-      const seen = new Set();
-      for (const raw of String(text ?? '').split(/\r?\n/)) {
-        const line = raw.trim();
-        if (line === '') continue;
-        const colon = line.indexOf(':');
-        const name = colon > 0 ? line.slice(0, colon).trim().toLowerCase() : '';
-        if (name === '' || seen.has(name)) continue;
-        seen.add(name);
-        out.push(line);
-      }
-      return out;
-    }
-
-    /** One scheme per line or comma, lower-cased and deduplicated. */
-    function textToSchemes(text) {
-      const out = [];
-      for (const raw of String(text ?? '').split(/[\r\n,]/)) {
-        const scheme = raw.trim().toLowerCase().replace(/:$/, '');
-        if (scheme !== '' && !out.includes(scheme)) out.push(scheme);
-      }
-      return out;
     }
 
     /**
@@ -698,41 +668,6 @@ window.__ModuleLoader__.load({
         hint ? h('p', { key: 'h', style: { ...ROW_DESC, marginTop: 8 } }, hint) : null,
       ]);
 
-      /**
-       * A two-option segmented control.
-       *
-       * A radio group is the honest control for `keep`/`overwrite`: the risk of
-       * `overwrite` has to be visible next to the choice, not hidden behind a
-       * generic select.
-       */
-      const choiceRow = (label, hint, value, options, onChange, first) => h('div', {
-        style: { ...ROW, borderTop: first ? 'none' : `1px solid ${C.border}` },
-      }, [
-        h('p', { key: 'l', style: { ...ROW_TITLE, marginBottom: 10 } }, label),
-        h('div', { key: 'g', role: 'radiogroup', 'aria-label': label, style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          options.map((option) => {
-            const on = value === option.value;
-            return h('label', {
-              key: option.value,
-              style: {
-                display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
-                padding: '7px 12px', borderRadius: 8, fontSize: 12.5,
-                border: `1px solid ${on ? C.brand : C.border}`,
-                background: on ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
-                color: on ? C.text : C.dim,
-              },
-            }, [
-              h('input', {
-                key: 'r', type: 'radio', name: label, checked: on,
-                onChange: () => onChange(option.value),
-                style: { margin: 0, accentColor: 'currentColor' },
-              }),
-              option.label,
-            ]);
-          })),
-        hint ? h('p', { key: 'h', style: { ...ROW_DESC, marginTop: 10 } }, hint) : null,
-      ]);
-
       return h('div', { style: { fontSize: 13, color: C.text, maxWidth: 760 } }, [
         h('section', { key: 'master', style: CARD }, [
           h('p', { key: 't', style: CARD_TITLE }, '总开关'),
@@ -779,36 +714,10 @@ window.__ModuleLoader__.load({
           ]),
         ]),
 
-        h('section', { key: 'defaults', style: CARD }, [
-          h('p', { key: 't', style: CARD_TITLE }, '下载默认值'),
-          h('p', { key: 'd', style: CARD_DESC },
-            '调用时没有显式指定这些参数，就按这里的取值执行。'),
-          h('div', { key: 'box', style: ROWS }, [
-            textRow('默认下载目录', '留空表示交给 Ghost 自己的下载目录（当前为 C:\\Users\\a_mol\\Downloads）。'
-              + '填绝对路径后，智能体不传 dir 时文件就落到这里——想让文件落在会话工作区，填工作区下的子目录即可。',
-            typeof draft.defaultDownloadDir === 'string' ? draft.defaultDownloadDir : '',
-            (value) => update({ defaultDownloadDir: value }),
-            { first: true, input: { placeholder: '例如 D:\\Downloads 或 <工作区>\\downloads' } }),
-            choiceRow('同名文件处理',
-              'overwrite 会静默覆盖同名的已有文件，属于破坏性行为；keep 会在重名时保留两者。',
-              draft.defaultConflict === 'overwrite' ? 'overwrite' : 'keep',
-              [{ value: 'keep', label: '保留两者' }, { value: 'overwrite', label: '覆盖' }],
-              (value) => update({ defaultConflict: value })),
-            textRow('ghost_wait 默认等待（秒）', '不传 timeoutSeconds 时阻塞多久。上限受上面的「同步等待上限」约束。',
-              num(draft.waitToolDefaultSeconds, 600),
-              (value) => update({ waitToolDefaultSeconds: numOf(value) }),
-              { input: { type: 'number', min: 10, step: 60 } }),
-            switchRow('notice', '完成通知里带文件路径',
-              '关闭后智能体只知道文件名，需要再查一次任务才能拿到落盘位置。',
-              draft.noticeIncludePath !== false,
-              (value) => update({ noticeIncludePath: value })),
-          ]),
-        ]),
-
         h('section', { key: 'security', style: CARD }, [
           h('p', { key: 't', style: CARD_TITLE }, '安全'),
           h('p', { key: 'd', style: CARD_DESC },
-            '这是把下载收敛到 Ghost 之后的限权面：限制能提交什么、能删什么、带什么请求头。'),
+            '这是把下载收敛到 Ghost 之后的限权面：限制能提交什么、能删什么。'),
           h('div', { key: 'box', style: ROWS }, [
             areaRow('允许的协议', '一行一个。不在列表里的链接会被直接拒绝，ghost_probe 同样受限。',
               (Array.isArray(draft.allowedUrlSchemes) && draft.allowedUrlSchemes.length > 0
@@ -826,11 +735,6 @@ window.__ModuleLoader__.load({
               + '注意 remove 会连同该任务尚未完成的文件一起删除。',
               draft.controlRemoveEnabled !== false,
               (value) => update({ controlRemoveEnabled: value })),
-            areaRow('默认请求头', '一行一个 "Name: value"，会叠加到每次提交。'
-              + '请求头会进入 ghd 的命令行参数，本机其它进程可以在进程列表里看到。',
-              (Array.isArray(draft.defaultHeaders) ? draft.defaultHeaders : []).join('\n'),
-              (value) => update({ defaultHeaders: linesToHeaders(value) }),
-              { rows: 4 }),
           ]),
         ]),
 

@@ -8,7 +8,7 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statfsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Schema from '@deepseek-ai/schemastery';
@@ -48,7 +48,7 @@ export const name = 'ghost-download';
 const PACKAGE_NAME = '@local/dsh-ghost-download';
 
 /** Tools only; everything else comes from the CLI. */
-export const inject = ['tools', 'configEditor'];
+export const inject = ['tools', 'configEditor', 'workingDirectory'];
 
 /**
  * Row configuration.
@@ -83,22 +83,11 @@ export const Config = Schema.object({
     .description('成功结果回传给模型的上限（字符）。'),
   maxErrorChars: Schema.natural().default(2000).min(200).volatile()
     .description('失败时附带原始输出的上限（字符）。'),
-  // ── per-call defaults ───────────────────────────────────────────────────
-  // These only fill in a value the call left out; an argument in the call
-  // always wins, which is what `resolveDefaults` implements below.
-  defaultDownloadDir: Schema.string().default('').volatile()
-    .description('所有下载的默认落地目录；留空则沿用 Ghost 自己配置的目录。'),
-  defaultConflict: Schema.union(['keep', 'overwrite']).default('keep').volatile()
-    .description('同名文件冲突策略默认值。选 overwrite 会静默覆盖同名的旧文件。'),
-  defaultHeaders: Schema.array(Schema.string()).default([]).volatile()
-    .description('统一附加的请求头（Referer / UA / Authorization 等），一行一个 "Name: value"。注意：请求头会进入 ghd 命令行参数，本机进程列表可见。'),
   allowedUrlSchemes: Schema.array(Schema.string()).min(1)
     .default(['http', 'https', 'ftp', 'magnet', 'ed2k']).volatile()
     .description('允许提交的协议白名单；不在列表里的链接会被直接拒绝。'),
   controlRemoveEnabled: Schema.boolean().default(true).volatile()
     .description('是否允许 ghost_control 的 remove。关闭后 remove 会从工具的参数枚举里消失。remove 会删除该任务尚未完成的文件。'),
-  waitToolDefaultSeconds: Schema.number().default(600).min(10).max(7200).volatile()
-    .description('ghost_wait 未指定 timeoutSeconds 时的默认等待秒数，仍受 waitLimitSeconds 上限约束。'),
   noticeIncludePath: Schema.boolean().default(true).volatile()
     .description('后台完成通知里是否附带下载文件的绝对路径。'),
 });
@@ -145,6 +134,12 @@ const SNAPSHOT_TIMEOUT_MS = 15000;
 const SNAPSHOT_TTL_MS = 3000;
 const PROBE_TTL_MS = 5 * 60 * 1000;
 const PROBE_CACHE_LIMIT = 200;
+/**
+ * Timeout for the throwaway `ghd probe` a precheck / doctor runs before doing
+ * anything else. Short on purpose: it must not stall the real download for more
+ * than a few seconds when Ghost happens to be offline.
+ */
+const PRECHECK_PROBE_TIMEOUT_MS = 20000;
 /** Stop background watching after this many consecutive CLI failures. */
 const WATCH_MAX_FAILURES = 10;
 /** A killed ghd that never exits settles the call from the log it already wrote. */
@@ -175,6 +170,8 @@ const TOOL_OUTPUT_SCHEMA = {
     filePath: { type: 'string' },
     stillRunning: { type: 'boolean' },
     cached: { type: 'boolean' },
+    precheck: {},
+    attribution: {},
     waited: {},
     detail: {},
     result: {},
@@ -436,6 +433,78 @@ function plain(value) {
 }
 
 /**
+ * Read Ghost Downloader's own settings (read-only) for the doctor's cross-check.
+ * Returns `{ downloadFolder, proxyServer, source }` or `{ error }` when missing.
+ * The path is固定的官方位置：%LOCALAPPDATA%\GhostDownloader\UserConfig.json。
+ */
+function readGhostUserConfig() {
+  const base = process.env.LOCALAPPDATA;
+  if (!base) return { error: '未找到环境变量 LOCALAPPDATA（非 Windows 或环境异常）。' };
+  const file = path.join(base, 'GhostDownloader', 'UserConfig.json');
+  try {
+    if (!existsSync(file)) return { error: `未找到 ${file}（Ghost 可能尚未保存过设置）。`, path: file };
+    const raw = readFileSync(file, 'utf8');
+    const json = JSON.parse(raw);
+    const general = json?.GeneralDownload ?? json?.generalDownload ?? {};
+    const downloadFolder = typeof general.DownloadFolder === 'string' ? general.DownloadFolder : undefined;
+    const proxyServer = typeof json?.ProxyServer === 'string'
+      ? json.ProxyServer
+      : (typeof general.ProxyServer === 'string' ? general.ProxyServer : undefined);
+    return { downloadFolder, proxyServer, path: file };
+  } catch (error) {
+    return { error: `读取或解析失败：${String(error?.message ?? error)}`, path: file };
+  }
+}
+
+/**
+ * Turn a ghd error string into an attribution the model can act on.
+ *
+ * Deliberately hedged ("可能原因"): the matcher sees text, not ground truth, so
+ * it must never assert the cause. Returns `{ category, hint, retryable }`.
+ */
+function failureAttribution(error) {
+  // ghd reports the failure in `error`, `lastError`, or sometimes a nested
+  // `message`; gather every string form into one lower-cased haystack.
+  const parts = [];
+  const collect = (value) => {
+    if (typeof value === 'string') parts.push(value);
+    else if (value && typeof value === 'object') {
+      for (const key of ['message', 'code', 'error', 'lastError', 'detail', 'reason']) {
+        if (value[key] !== undefined) collect(value[key]);
+      }
+    }
+  };
+  collect(error);
+  const text = parts.join(' ').toLowerCase();
+
+  const match = (pattern) => pattern.test(text);
+  let category = 'unknown';
+  let hint = '可能原因不明；请查看原始 error 输出，或稍后重试。';
+  let retryable = true;
+
+  if (match(/ssl|certificate|certificate_verify_failed|cert_verify|tls|握手/i)) {
+    category = 'certificate';
+    hint = '可能原因：目标站点的 SSL/TLS 证书校验失败（代理、自签名证书或系统时间异常都可能引起）。'
+      + '请检查系统时间与代理证书设置；若确认可信，可在 Ghost 设置中调整证书校验。';
+  } else if (match(/dns|11001|host not found|name resolution|getaddrinfo|enotfound/i)) {
+    category = 'network.dns';
+    hint = '可能原因：域名解析失败（DNS 不可达、域名不存在或网络断开）。请检查网络连接与 DNS 设置后重试。';
+  } else if (match(/\b403\b|\b401\b|unauthorized|forbidden|access denied/i)) {
+    category = 'auth';
+    hint = '可能原因：服务器拒绝了未授权的请求（403/401）。可尝试在 headers 里补上 Referer / Cookie 等鉴权信息后重试。';
+  } else if (match(/\b404\b|not found|gone/i)) {
+    category = 'gone';
+    hint = '可能原因：资源不存在或已被移除（404）。该链接可能已失效，通常不建议重试。';
+    retryable = false;
+  } else if (match(/范围请求|range request|range not satisfiable|416|range|断点续传/i)) {
+    category = 'noRange';
+    hint = '可能原因：服务器拒绝了范围请求，无法断点续传。可尝试删除残缺文件后从头下载。';
+  }
+
+  return { category, hint, retryable };
+}
+
+/**
  * The row's live configuration.
  *
  * `apply` captures the activation-time config, which is a snapshot: a save from
@@ -488,14 +557,10 @@ function readRowConfig(ctx, captured) {
     watchLimitMinutes: pick('watchLimitMinutes', 30, isNum),
     maxOutputChars: pick('maxOutputChars', MAX_OUTPUT, isNum),
     maxErrorChars: pick('maxErrorChars', MAX_ERROR_RAW, isNum),
-    defaultDownloadDir: pick('defaultDownloadDir', '', isText),
-    defaultConflict: pick('defaultConflict', 'keep', (v) => v === 'keep' || v === 'overwrite'),
-    defaultHeaders: cleanList(plain(captured?.defaultHeaders)) ?? [],
     // An empty allow-list would reject every link, so it falls back to the
     // documented default instead of locking the plugin out of its own purpose.
     allowedUrlSchemes: cleanList(plain(captured?.allowedUrlSchemes)) ?? [...DEFAULT_URL_SCHEMES],
     controlRemoveEnabled: pick('controlRemoveEnabled', true, isBool),
-    waitToolDefaultSeconds: pick('waitToolDefaultSeconds', DEFAULT_WAIT_TOOL_SECONDS, isNum),
     noticeIncludePath: pick('noticeIncludePath', true, isBool),
   };
   try {
@@ -516,20 +581,43 @@ function readRowConfig(ctx, captured) {
       take('watchLimitMinutes', isNum);
       take('maxOutputChars', isNum);
       take('maxErrorChars', isNum);
-      take('defaultDownloadDir', isText);
-      take('defaultConflict', (v) => v === 'keep' || v === 'overwrite');
-      const headers = cleanList(plain(values.defaultHeaders));
-      if (headers !== undefined) merged.defaultHeaders = headers;
       const schemes = cleanList(plain(values.allowedUrlSchemes));
       if (schemes !== undefined) merged.allowedUrlSchemes = schemes;
       take('controlRemoveEnabled', isBool);
-      take('waitToolDefaultSeconds', isNum);
       take('noticeIncludePath', isBool);
     }
   } catch {
     // No configuration editor in this composition: keep the captured values.
   }
   return merged;
+}
+
+/**
+ * The default landing folder: `<session working directory>/downloads`.
+ *
+ * Ghost's own download folder sits outside the workspace, so defaulting to it
+ * hands the agent a path its file tools cannot read. An unwritable workspace
+ * falls back to `''`, which makes the caller omit `-o` and let Ghost decide.
+ *
+ * @param ctx - plugin context supplying `workingDirectory`.
+ * @param exec - the tool execution context carrying the calling agent.
+ * @returns an absolute folder, or `''` to leave the destination to Ghost.
+ */
+function workspaceDownloads(ctx, exec) {
+  let base;
+  try {
+    const session = exec?.agent?.session;
+    base = session === undefined ? process.cwd() : ctx.workingDirectory.get(session);
+  } catch {
+    base = process.cwd();
+  }
+  const dir = path.join(base, 'downloads');
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    return '';
+  }
+  return dir;
 }
 
 /**
@@ -611,10 +699,10 @@ export function apply(ctx, config) {
   };
 
   /**
-   * Merge the row's default headers with the call's, by header NAME.
+   * Normalize request headers supplied by one call.
    *
-   * The call wins on a same-name header (the documented precedence), and the
-   * comparison is case-insensitive because HTTP header names are.
+   * Duplicate names collapse to the first occurrence and the comparison is
+   * case-insensitive because HTTP header names are.
    */
   const mergeHeaders = (defaults, extra) => {
     const out = [];
@@ -910,6 +998,66 @@ export function apply(ctx, config) {
     ),
   }];
 
+  /**
+   * Run a lightweight `ghd probe` and return only the fields a precheck needs:
+   * the resolved file name and its byte size. Never throws — a probe failure is
+   * returned as `{ ok:false, reason }` so callers can report it without losing
+   * the real download.
+   */
+  async function probeInfo(url, headers, signal) {
+    const argv = ['probe', url];
+    for (const header of headers) argv.push('-H', header);
+    try {
+      const result = await call(argv, { timeoutMs: PRECHECK_PROBE_TIMEOUT_MS, signal });
+      if (!result.ok) {
+        return { ok: false, reason: result.error?.message ?? 'ghd probe 未返回成功结果' };
+      }
+      const p = result.result && typeof result.result === 'object' ? result.result : {};
+      // ghd probe reports a scalar size in bytes; tolerate a few aliases ghd has
+      // used across versions. A size that cannot be read as a finite number stays
+      // `undefined` so no false "insufficient space" verdict is produced.
+      const rawSize = p.size ?? p.fileSize ?? p.totalSize ?? p.length;
+      const size = Number.isFinite(Number(rawSize)) && rawSize !== null && rawSize !== ''
+        ? Number(rawSize)
+        : undefined;
+      const name = typeof p.name === 'string' && p.name !== ''
+        ? p.name
+        : (typeof p.fileName === 'string' ? p.fileName : undefined);
+      return { ok: true, name, size };
+    } catch (error) {
+      return { ok: false, reason: String(error?.message ?? error) };
+    }
+  }
+
+  /**
+   * Free bytes on the filesystem holding `folder`, via node:fs statfsSync.
+   * Returns `undefined` when the path does not exist or statfs is unavailable,
+   * so callers can label the check "未检查" instead of inventing a number.
+   */
+  function freeBytesOf(folder) {
+    if (typeof folder !== 'string' || folder === '') return undefined;
+    try {
+      const stats = statfsSync(folder);
+      if (stats && Number.isFinite(stats.bavail)) {
+        return stats.bavail * stats.bsize;
+      }
+    } catch {
+      // unavailable on this platform / path — treated as "not checked"
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve the exact target path for a same-name check. `name` from the user
+   * takes precedence; otherwise the probed file name is used. Only single-file
+   * names without path separators are accepted (a bare file name, not a path).
+   */
+  function targetPathOf(folder, name) {
+    if (typeof folder !== 'string' || folder === '' || typeof name !== 'string' || name === '') return undefined;
+    if (name.includes('/') || name.includes('\\') || path.isAbsolute(name)) return undefined;
+    return path.join(folder, name);
+  }
+
   // Read-only queue snapshot for the sidebar pane and the composer-dock card.
   // Registered BEFORE the `enabled` early return: the browser half always mounts
   // its tab, so a disabled plugin must keep answering this route instead of
@@ -920,20 +1068,73 @@ export function apply(ctx, config) {
     let snapshot = { at: 0, payload: { ok: false, tasks: [] } };
     /** One ghd spawn shared by every poller inside the TTL window. */
     let inFlight;
+    /**
+     * Per-task history of `{ at, receivedBytes }` samples for speed estimation.
+     * Bounded to 5 points (a sliding window): no extra ghd process is spawned —
+     * samples are taken from the SAME `ghd tasks` snapshot already polled here.
+     */
+    const speedHistory = new Map();
+    const SPEED_WINDOW = 5;
+    /** Pick the byte counter ghd exposes, if any. `null` when unavailable. */
+    const receivedOf = (task) => {
+      for (const key of ['receivedBytes', 'completedLength', 'completedSize', 'downloaded', 'bytesReceived']) {
+        const value = task?.[key];
+        if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))) {
+          return Number(value);
+        }
+      }
+      return null;
+    };
+    /**
+     * Estimate bytes/sec from the last up-to-5 samples. Returns `null` when there
+     * are fewer than 2 usable samples, no time has passed, or the file size is 0
+     * (finished tasks report `fileSize: 0` — no meaningful speed can be derived).
+     */
+    const estimateSpeed = (id, received, fileSize) => {
+      if (received === null || !(Number.isFinite(fileSize) && fileSize > 0)) return null;
+      const now = Date.now();
+      let history = speedHistory.get(id);
+      if (!history) {
+        history = [];
+        speedHistory.set(id, history);
+      }
+      history.push({ at: now, received });
+      if (history.length > SPEED_WINDOW) history.splice(0, history.length - SPEED_WINDOW);
+      if (history.length < 2) return null;
+      const first = history[0];
+      const last = history[history.length - 1];
+      const elapsed = (last.at - first.at) / 1000;
+      if (elapsed <= 0 || last.received < first.received) return null;
+      return Math.max(0, Math.round((last.received - first.received) / elapsed));
+    };
     const readQueue = async () => {
       if (inFlight === undefined) {
         inFlight = (async () => {
           try {
             const result = await runGhd(ghd(), ['tasks'], { timeoutMs: SNAPSHOT_TIMEOUT_MS });
             const envelope = unwrap(parsePayload(result.output));
-            const tasks = envelope.ok && Array.isArray(envelope.result)
-              ? envelope.result.map((task) => ({
-                id: task.taskId,
+            const list = envelope.ok && Array.isArray(envelope.result) ? envelope.result : [];
+            const seen = new Set();
+            const tasks = list.map((task) => {
+              const id = task.taskId;
+              seen.add(id);
+              const received = receivedOf(task);
+              const fileSize = Number.isFinite(Number(task?.fileSize)) ? Number(task.fileSize) : 0;
+              const speedBps = estimateSpeed(id, received, fileSize);
+              return {
+                id,
                 name: task.name,
                 status: task.status,
                 progress: task.progress,
-              }))
-              : [];
+                // A 0 fileSize means Ghost reports no size for this task; suppress
+                // the speed estimate rather than inventing one.
+                ...(received !== null ? { receivedBytes: received } : {}),
+                ...(speedBps !== null ? { speedBps } : {}),
+              };
+            });
+            // Drop history for tasks that disappeared from the queue, so a removed
+            // task's stale samples cannot leak into a reused id later.
+            for (const key of speedHistory.keys()) if (!seen.has(key)) speedHistory.delete(key);
             snapshot = { at: Date.now(), payload: { ok: envelope.ok, tasks } };
           } catch (error) {
             snapshot = { at: Date.now(), payload: { ok: false, tasks: [], error: String(error) } };
@@ -980,8 +1181,8 @@ export function apply(ctx, config) {
         },
         dir: {
           type: 'string',
-          description: `Destination folder for this task (ghd -o). Omitted: the row's defaultDownloadDir (`
-            + `${settings().defaultDownloadDir.trim() === '' ? "unset, so Ghost's own folder is used" : `"${settings().defaultDownloadDir.trim()}"`}).`,
+          description: 'Destination folder for this task (ghd -o). Omitted: a `downloads` folder inside the '
+            + 'session working directory, so the files stay readable by the agent that asked for them.',
         },
         select: {
           type: 'string',
@@ -994,14 +1195,25 @@ export function apply(ctx, config) {
         headers: {
           type: 'array',
           items: { type: 'string' },
-          description: `Extra request headers as "Name: value" (ghd -H); repeatable. A same-name header here overrides the row default. `
-            + `${settings().defaultHeaders.length} row default header(s) are merged in. Header values enter the ghd argv, so the local process list shows them.`,
+          description: 'Extra request headers as "Name: value" (ghd -H); repeatable. '
+            + 'Header values enter the ghd argv, so the local process list shows them.',
         },
         conflict: {
           type: 'string',
           enum: ['keep', 'overwrite'],
-          description: `When the target name already exists: keep both or overwrite (ghd --conflict). `
-            + `Omitted: the row default, currently "${settings().defaultConflict}".`,
+          description: 'When the target name already exists: keep both (default) or overwrite (ghd --conflict).',
+        },
+        useGhostFolder: {
+          type: 'boolean',
+          description: 'Ignore `dir` and let Ghost choose the destination, so its own category rules apply. '
+            + 'The resulting file may land outside the workspace; pass `dir` when you need to read it back.',
+        },
+        precheck: {
+          type: 'boolean',
+          description: 'Before submitting, use `ghd probe` to check free space and any same-named file in the '
+            + 'target folder. Reports decision ("blocked" on insufficient space, "skip" when a file of the '
+            + 'same name and size already exists, "warn" on a size mismatch) but NEVER skips the download '
+            + 'on its own — the decision is advice for you to act on.',
         },
         waitSeconds: {
           type: 'integer',
@@ -1018,6 +1230,15 @@ export function apply(ctx, config) {
       render: (_args, value) => {
         const v = value && typeof value === 'object' ? value : {};
         const lines = [];
+        // A precheck is advice, never a silent gate: always surface its verdict.
+        if (v.precheck) {
+          const pc = v.precheck;
+          lines.push(`预检（仅报告，不会自动跳过）：${pc.decision}`);
+          if (pc.estimateBytes !== undefined) lines.push(`  预计字节数：${pc.estimateBytes}`);
+          if (pc.freeBytes !== undefined) lines.push(`  目标目录剩余空间：${pc.freeBytes} 字节`);
+          else lines.push('  目标目录剩余空间：未检查');
+          for (const reason of (Array.isArray(pc.reasons) ? pc.reasons : [])) lines.push(`  - ${reason}`);
+        }
         // A degraded call (e.g. "waited but no task id") must be visible to the model.
         if (v.warning) lines.push(`⚠ ${v.warning}`);
         const timedOut = Boolean(v.timedOut || v.waited?.timedOut);
@@ -1087,23 +1308,78 @@ export function apply(ctx, config) {
       const argv = ['add', ...urls];
       if (select !== undefined) argv.push('--select', select);
       if (name !== undefined) argv.push('--name', name);
-      // Precedence per call: explicit argument, else the row default, else Ghost's
-      // own configured folder (no `-o` at all).
-      const dir = typeof args.dir === 'string' && args.dir.trim() !== ''
-        ? args.dir.trim()
-        : cfg.defaultDownloadDir.trim();
+      // Precedence per call: an explicit argument, else a `downloads` folder in the
+      // session working directory. Ghost's own folder lives outside the workspace,
+      // so defaulting to it would hand the agent a file it cannot read afterwards.
+      // `useGhostFolder` opts out and lets Ghost apply its own category rules.
+      let dir = typeof args.dir === 'string' ? args.dir.trim() : '';
+      if (dir === '' && args.useGhostFolder !== true) dir = workspaceDownloads(ctx, exec);
       if (dir !== '') argv.push('-o', dir);
-      const conflict = args.conflict === 'overwrite' || args.conflict === 'keep'
-        ? args.conflict
-        : cfg.defaultConflict;
-      if (conflict === 'overwrite') argv.push('--conflict', 'overwrite');
-      // Row headers are the baseline; a same-name header in the call wins.
+      // A same-named existing file is kept by default; overwriting is opt-in.
+      if (args.conflict === 'overwrite') argv.push('--conflict', 'overwrite');
       const callHeaders = Array.isArray(args.headers) ? args.headers : [];
+      const probeHeaders = mergeHeaders([], callHeaders);
       for (const header of callHeaders) {
         if (typeof header !== 'string' || header.trim() === '') continue;
         if (!header.includes(':')) throw new Error(`Header "${header}" is not in "Name: value" form.`);
+        argv.push('-H', header.trim());
       }
-      for (const header of mergeHeaders(cfg.defaultHeaders, callHeaders)) argv.push('-H', header);
+
+      // Precheck is advisory only: it never suppresses the download. We probe
+      // each URL once, then compare the resolved target against the destination
+      // folder and the free space on that filesystem.
+      let precheckReport;
+      if (args.precheck === true) {
+        const reasons = [];
+        const checkDir = dir !== '' ? dir : (args.useGhostFolder === true ? workspaceDownloads(ctx, exec) : dir);
+        const freeBytes = checkDir !== '' ? freeBytesOf(checkDir) : undefined;
+        const samples = [];
+        for (const url of urls) {
+          // A magnet:/ed2k: link may need a torrent to resolve a name/size; if the
+          // probe cannot answer, say so rather than pretending the check passed.
+          // eslint-disable-next-line no-await-in-loop
+          const info = await probeInfo(url, probeHeaders, exec.signal);
+          if (!info.ok) {
+            reasons.push(`「${url}」预检探测失败：${info.reason}（未检查该链接）`);
+            samples.push({ url, checked: false });
+            continue;
+          }
+          samples.push({ url, checked: true, name: info.name, size: info.size });
+          const targetName = name ?? info.name;
+          const target = targetPathOf(checkDir, targetName);
+          if (Number.isFinite(info.size) && info.size > 0) {
+            if (freeBytes !== undefined && info.size > freeBytes) {
+              reasons.push(`「${targetName ?? url}」预计需要 ${info.size} 字节，目标目录剩余空间约 ${freeBytes} 字节，可能不足。`);
+            }
+            if (target !== undefined && existsSync(target)) {
+              try {
+                const existingSize = statSync(target).size;
+                if (existingSize === info.size) {
+                  reasons.push(`目标已存在同名且大小相同的文件「${targetName}」（${existingSize} 字节），可能已经下载过。`);
+                } else {
+                  reasons.push(`目标已存在同名文件「${targetName}」，但大小不同（现有 ${existingSize} 字节，预期 ${info.size} 字节），可能残缺或被占用。`);
+                }
+              } catch {
+                reasons.push(`目标已存在同名文件「${targetName}」，但无法读取其大小，可能残缺。`);
+              }
+            }
+          }
+        }
+        if (freeBytes === undefined) reasons.push('目标目录剩余空间未检查（无法获取 statfs 或未指定可写目录）。');
+        // Decision is a report, not a gate: "blocked"/"skip"/"warn" is advisory.
+        const decision = reasons.some((r) => r.includes('空间') && r.includes('不足'))
+          ? 'blocked'
+          : reasons.some((r) => r.includes('可能已经下载过'))
+            ? 'skip'
+            : (reasons.length > 0 ? 'warn' : 'ok');
+        precheckReport = {
+          decision,
+          reasons,
+          ...(samples.some((s) => Number.isFinite(s.size)) ? { estimateBytes: samples.reduce((sum, s) => sum + (Number.isFinite(s.size) ? s.size : 0), 0) } : {}),
+          ...(freeBytes !== undefined ? { freeBytes } : {}),
+          ...(samples.some((s) => s.checked) ? { existing: samples.filter((s) => s.checked).map((s) => ({ url: s.url, name: s.name, size: s.size })) } : {}),
+        };
+      }
 
       const submitted = await call(argv, { timeoutMs: ADD_TIMEOUT_MS, signal: exec.signal });
       // `ghd add` reports per-item failures inside one envelope: a partial batch
@@ -1122,7 +1398,7 @@ export function apply(ctx, config) {
         const warning = submitted.ok && waitSeconds > 0
           ? { warning: 'ghd 未返回任务 id，因此没有等待任何任务。' }
           : {};
-        return { ...submitted, ...(taskIds.length > 0 ? { taskIds, taskId: taskIds[0] } : {}), ...warning };
+        return { ...submitted, ...(precheckReport ? { precheck: precheckReport } : {}), ...(taskIds.length > 0 ? { taskIds, taskId: taskIds[0] } : {}), ...warning };
       }
 
       // Clamp the wait to the configured limit AND to what the registered tool
@@ -1190,6 +1466,7 @@ export function apply(ctx, config) {
         detail: detailValue,
         statuses,
         stillRunning,
+        ...(precheckReport ? { precheck: precheckReport } : {}),
         ...(landing !== undefined ? { filePath: landing } : {}),
         ...(failure !== undefined ? { error: failure } : {}),
         ok,
@@ -1216,6 +1493,10 @@ export function apply(ctx, config) {
           type: 'array',
           items: { type: 'string' },
           description: 'Extra request headers as "Name: value" (ghd -H); repeatable.',
+        },
+        fresh: {
+          type: 'boolean',
+          description: 'Skip the probe cache and ask Ghost again (useful after a torrent changed on the source).',
         },
       },
       required: ['url'],
@@ -1251,12 +1532,12 @@ export function apply(ctx, config) {
         if (typeof header !== 'string' || header.trim() === '') continue;
         if (!header.includes(':')) throw new Error(`Header "${header}" is not in "Name: value" form.`);
       }
-      const headers = mergeHeaders(cfg.defaultHeaders, callHeaders);
+      const headers = mergeHeaders([], callHeaders);
       for (const header of headers) argv.push('-H', header);
       // The key covers the MERGED headers: a changed row default must not hit a
       // cached probe produced with different headers.
       const cacheKey = `${url}\u0000${JSON.stringify(headers)}`;
-      const hit = probeCache.get(cacheKey);
+      const hit = args.fresh === true ? undefined : probeCache.get(cacheKey);
       if (hit !== undefined) {
         if (Date.now() - hit.at < PROBE_TTL_MS) return { ...hit.value, cached: true };
         probeCache.delete(cacheKey);
@@ -1285,6 +1566,10 @@ export function apply(ctx, config) {
         status: {
           type: 'string',
           description: 'Only list tasks in this state (ghd -s), for example waiting, running, paused, completed, failed.',
+        },
+        limit: {
+          type: 'integer',
+          description: 'Return at most this many tasks (newest first). Omit for every task Ghost knows.',
         },
       },
     },
@@ -1342,7 +1627,14 @@ export function apply(ctx, config) {
 
       const argv = ['tasks'];
       if (typeof args?.status === 'string' && args.status.trim() !== '') argv.push('-s', args.status.trim());
-      return call(argv, { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+      const result = await call(argv, { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+      // Trimming is a presentation concern: it never changes what ghd reported,
+      // so `total` keeps the untrimmed count visible to the caller.
+      const limit = Number.isInteger(args?.limit) && args.limit > 0 ? args.limit : 0;
+      if (limit === 0 || !result.ok || !Array.isArray(result.result)) return result;
+      const all = result.result;
+      if (all.length <= limit) return result;
+      return { ...result, result: all.slice(0, limit), total: all.length };
     },
   });
 
@@ -1357,7 +1649,20 @@ export function apply(ctx, config) {
     },
     output: {
       schema: TOOL_OUTPUT_SCHEMA,
-      render: jsonRender,
+      render: (_args, value) => {
+        const blocks = jsonRender(_args, value);
+        if (value && value.attribution) {
+          const a = value.attribution;
+          blocks.push({
+            type: 'text',
+            text: bounded(
+              `失败归因（可能原因）：${a.category}；可重试：${a.retryable ? '是' : '否'}\n${a.hint}`,
+              settings().maxErrorChars,
+            ),
+          });
+        }
+        return blocks;
+      },
     },
     isConcurrencySafe: () => true,
     timeoutMs: TASK_TIMEOUT_MS + 10000,
@@ -1368,7 +1673,15 @@ export function apply(ctx, config) {
       if (!taskId) throw new Error('ghost_task requires taskId.');
       // A leading dash or unknown shape would be parsed as a ghd switch.
       if (!TASK_ID.test(taskId)) throw new Error(`Invalid task id: ${taskId}`);
-      return call(['task', taskId], { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+      const result = await call(['task', taskId], { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+      // Attach a hedged attribution whenever ghd reported a task-level error.
+      // The raw error stays intact — attribution is additive, never a replacement.
+      const detail = result.ok && result.result && typeof result.result === 'object' ? result.result : undefined;
+      const taskError = detail ? (detail.lastError ?? detail.error) : (result.error?.message ?? result.error ?? undefined);
+      const attribution = taskError !== undefined && taskError !== null && taskError !== ''
+        ? failureAttribution(taskError)
+        : undefined;
+      return { ...result, ...(attribution ? { attribution } : {}) };
     },
   });
 
@@ -1380,8 +1693,8 @@ export function apply(ctx, config) {
    * sees and the tool that runs cannot disagree.
    */
   const controlActions = () => (settings().controlRemoveEnabled
-    ? ['pause', 'start', 'remove']
-    : ['pause', 'start']);
+    ? ['pause', 'start', 'retry', 'remove']
+    : ['pause', 'start', 'retry']);
 
   ctx.tools.register({
     name: 'ghost_control',
@@ -1400,9 +1713,14 @@ export function apply(ctx, config) {
           enum: controlActions(),
           description: `Operation to perform. One of: ${controlActions().join(', ')}.`,
         },
-        taskIds: { type: 'array', items: { type: 'string' }, description: 'One or more task ids, for example ["tsk_0123"].' },
+        taskIds: { type: 'array', items: { type: 'string' }, description: 'One or more task ids, for example ["tsk_0123"]. Omit for retry to mean every failed task.' },
+        deleteFiles: {
+          type: 'boolean',
+          description: 'remove only: also delete the files the task already produced. '
+            + 'Off by default; a removed task always loses its unfinished partial files.',
+        },
       },
-      required: ['action', 'taskIds'],
+      required: ['action'],
     },
     output: {
       schema: TOOL_OUTPUT_SCHEMA,
@@ -1419,10 +1737,32 @@ export function apply(ctx, config) {
       if (action === 'remove' && !settings().controlRemoveEnabled) {
         throw new Error('remove 已被本插件的设置禁用（controlRemoveEnabled=false）。可在插件页的「安全」里重新开启。');
       }
-      const ids = Array.isArray(args?.taskIds) ? args.taskIds.filter((id) => typeof id === 'string' && id.trim() !== '') : [];
-      if (ids.length === 0) throw new Error('ghost_control requires at least one task id.');
-      for (const id of ids) if (!TASK_ID.test(id)) throw new Error(`Invalid task id: ${id}`);
-      return call([action, ...ids], { timeoutMs: CONTROL_TIMEOUT_MS, signal: exec.signal });
+      const givenIds = Array.isArray(args?.taskIds)
+        ? args.taskIds.filter((id) => typeof id === 'string' && id.trim() !== '')
+        : [];
+      for (const id of givenIds) if (!TASK_ID.test(id)) throw new Error(`Invalid task id: ${id}`);
+
+      // `retry` is sugar over "list the failed tasks, then start them": ghd start
+      // already resumes a failed task, so no extra capability is invented.
+      if (action === 'retry') {
+        let ids = givenIds;
+        if (ids.length === 0) {
+          const listed = await call(['tasks', '-s', 'failed'], { timeoutMs: CONTROL_TIMEOUT_MS, signal: exec.signal });
+          ids = findTaskIds(Array.isArray(listed.result) ? listed.result : []);
+        }
+        if (ids.length === 0) {
+          return { ok: true, result: { retried: [], note: '没有处于 failed 状态的任务。' } };
+        }
+        const started = await call(['start', ...ids], { timeoutMs: CONTROL_TIMEOUT_MS, signal: exec.signal });
+        return { ...started, result: { retried: ids, underlying: started.result } };
+      }
+
+      if (givenIds.length === 0) throw new Error('ghost_control requires at least one task id.');
+      const argv = [action, ...givenIds];
+      // Only remove accepts it, and only when asked: it is the one switch that
+      // destroys files the user already has on disk.
+      if (action === 'remove' && args?.deleteFiles === true) argv.push('--delete-files');
+      return call(argv, { timeoutMs: CONTROL_TIMEOUT_MS, signal: exec.signal });
     },
   });
 
@@ -1438,7 +1778,7 @@ export function apply(ctx, config) {
         taskIds: { type: 'array', items: { type: 'string' }, description: 'Task ids to wait for, for example ["tsk_0123"].' },
         timeoutSeconds: {
           type: 'integer',
-          description: `Maximum seconds to block (default ${settings().waitToolDefaultSeconds}, capped at ${settings().waitLimitSeconds}). On timeout the result carries timedOut: true.`,
+          description: `Maximum seconds to block (default ${DEFAULT_WAIT_TOOL_SECONDS}, capped at ${settings().waitLimitSeconds}). On timeout the result carries timedOut: true.`,
         },
       },
       required: ['taskIds'],
@@ -1457,13 +1797,234 @@ export function apply(ctx, config) {
       if (ids.length === 0) throw new Error('ghost_wait requires at least one task id.');
       for (const id of ids) if (!TASK_ID.test(id)) throw new Error(`Invalid task id: ${id}`);
       const cfg = settings();
-      // Precedence: the call's timeoutSeconds, else the row's waitToolDefaultSeconds;
-      // either way it is clamped to the row's hard ceiling.
+      // The call decides; the plugin only caps it at the configured ceiling.
       const requested = Number.isInteger(args.timeoutSeconds)
         ? args.timeoutSeconds
-        : cfg.waitToolDefaultSeconds;
+        : DEFAULT_WAIT_TOOL_SECONDS;
       const limit = Math.min(Math.max(requested, 1), cfg.waitLimitSeconds);
       return call(['wait', ...ids], { timeoutMs: limit * 1000, signal: exec.signal });
+    },
+  });
+
+  ctx.tools.register({
+    name: 'ghost_stats',
+    description: 'Aggregate the tasks CURRENTLY VISIBLE in Ghost Downloader: group counts by status and '
+      + 'total byte size. IMPORTANT: Ghost does not retain a download history, so this tool can only '
+      + 'summarise the present queue — the `range` parameter is acknowledged but cannot filter by time '
+      + 'because no per-task timestamps are kept. No separate ledger is invented.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        range: {
+          type: 'string',
+          enum: ['7d', '30d', 'all'],
+          description: "Reporting window ('7d' | '30d' | 'all', default '7d'). Accepted for a consistent API, "
+            + 'but Ghost keeps no history or timestamps, so it does not actually restrict the results.',
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          note: { type: 'string' },
+          range: { type: 'string' },
+          rangeApplied: { type: 'boolean' },
+          totalTasks: { type: 'integer' },
+          byStatus: {},
+          totalBytes: { type: 'integer' },
+          error: {},
+        },
+        required: ['note', 'totalTasks', 'byStatus', 'totalBytes'],
+      },
+      render: (_args, value) => {
+        const lines = [value?.note ?? ''];
+        const byStatus = value?.byStatus && typeof value.byStatus === 'object' ? value.byStatus : {};
+        lines.push(`当前可见任务共 ${value?.totalTasks ?? 0} 个，总字节数 ${value?.totalBytes ?? 0}。`);
+        for (const [status, stat] of Object.entries(byStatus)) {
+          lines.push(`- ${status}：${stat.count} 个，${stat.bytes} 字节`);
+        }
+        if (value?.rangeApplied === false) lines.push(`（range=${value.range ?? ''} 未生效：Ghost 不保留历史时间戳。）`);
+        return [{ type: 'text', text: bounded(lines.filter(Boolean).join('\n'), settings().maxOutputChars) }];
+      },
+    },
+    isConcurrencySafe: () => true,
+    timeoutMs: TASK_TIMEOUT_MS + 10_000,
+    async execute(args, exec) {
+      assertEnabled();
+      const range = ['7d', '30d', 'all'].includes(args?.range) ? args.range : '7d';
+      const result = await call(['tasks'], { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+      if (!result.ok) {
+        return {
+          note: '本工具只统计当前可见任务；但本次 ghd tasks 调用失败，没有得到可统计的任务。',
+          range,
+          rangeApplied: false,
+          totalTasks: 0,
+          byStatus: {},
+          totalBytes: 0,
+          error: result.error,
+        };
+      }
+      const list = Array.isArray(result.result) ? result.result : [];
+      const byStatus = {};
+      let totalBytes = 0;
+      for (const task of list) {
+        const status = String(task?.status ?? 'unknown').toLowerCase() || 'unknown';
+        const raw = task?.fileSize ?? task?.totalSize ?? task?.size ?? 0;
+        const size = Number.isFinite(Number(raw)) && raw !== null && raw !== '' ? Number(raw) : 0;
+        totalBytes += size;
+        if (!byStatus[status]) byStatus[status] = { count: 0, bytes: 0 };
+        byStatus[status].count += 1;
+        byStatus[status].bytes += size;
+      }
+      return {
+        note: '本工具只统计当前可见任务（Ghost 不保留下载历史，无法给出已删除或已完成很久的任务）。',
+        range,
+        rangeApplied: false,
+        totalTasks: list.length,
+        byStatus,
+        totalBytes,
+      };
+    },
+  });
+
+  /**
+   * A tiny, stable, publicly readable file used only by the doctor's network/cert
+   * probe. If Ghost cannot fetch even this, the fault is network/proxy/certificate,
+   * not the specific download the user wanted.
+   */
+  const DOCTOR_PROBE_URL = 'https://raw.githubusercontent.com/octocat/Hello-World/master/README';
+
+  ctx.tools.register({
+    name: 'ghost_doctor',
+    description: 'Run a read-only health check of the Ghost Downloader integration: '
+      + 'ghd availability, a live `ghd tasks` call, a network/certificate probe against a known small file, '
+      + 'writability of the session downloads folder, and a cross-check with Ghost\'s own UserConfig.json '
+      + '(download folder and proxy). Returns { checks: [{ name, ok, detail, hint }] }. No side effects on downloads.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          checks: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                ok: { type: 'boolean' },
+                detail: { type: 'string' },
+                hint: { type: 'string' },
+              },
+              required: ['name', 'ok', 'detail'],
+            },
+          },
+        },
+        required: ['checks'],
+      },
+      render: (_args, value) => {
+        const checks = Array.isArray(value?.checks) ? value.checks : [];
+        const lines = checks.map((c) => {
+          const mark = c.ok ? '✓' : '✗';
+          const hint = c.hint ? `\n    ↳ ${c.hint}` : '';
+          return `${mark} ${c.name}：${c.detail}${hint}`;
+        });
+        const passed = checks.filter((c) => c.ok).length;
+        lines.unshift(`体检结果：${passed}/${checks.length} 项通过`);
+        return [{ type: 'text', text: bounded(lines.join('\n'), settings().maxOutputChars) }];
+      },
+    },
+    isConcurrencySafe: () => true,
+    timeoutMs: (PRECHECK_PROBE_TIMEOUT_MS + TASK_TIMEOUT_MS + CONTROL_TIMEOUT_MS) + 30_000,
+    async execute(_args, exec) {
+      assertEnabled();
+      const checks = [];
+      const add = (name, ok, detail, hint) => {
+        checks.push({ name, ok, detail, ...(hint ? { hint } : {}) });
+      };
+
+      // ① ghd --version
+      try {
+        const result = await runGhd(ghd(), ['--version'], { timeoutMs: PRECHECK_PROBE_TIMEOUT_MS });
+        const ok = result.code === 0 && !result.timedOut && result.output.trim() !== '';
+        add('ghd 可执行文件', ok,
+          ok ? `ghd 可用（${result.output.trim().slice(0, 120)}）` : `ghd --version 失败（exit ${result.code}${result.timedOut ? ', 超时' : ''}）`,
+          ok ? undefined : '请在 Ghost Downloader 的「设置 → 命令行工具」安装 ghd，或在插件配置里设置 ghdPath。');
+      } catch (error) {
+        add('ghd 可执行文件', false, `无法运行 ghd：${String(error?.message ?? error)}`,
+          '检查 ghdPath 配置或 GHOST_GHD 环境变量。');
+      }
+
+      // ② ghd tasks — liveness of the queue/backend
+      try {
+        const result = await call(['tasks'], { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+        add('ghd tasks（队列存活）', result.ok,
+          result.ok ? `可读取队列（${Array.isArray(result.result) ? result.result.length : '?'} 个任务）`
+            : `ghd tasks 失败：${String(result.error?.message ?? result.error ?? '未知错误')}`,
+          result.ok ? undefined : 'Ghost 主程序可能未运行，或队列服务未就绪。');
+      } catch (error) {
+        add('ghd tasks（队列存活）', false, `ghd tasks 异常：${String(error?.message ?? error)}`);
+      }
+
+      // ③ ghd probe a known small file — network / certificate / proxy
+      try {
+        const info = await probeInfo(DOCTOR_PROBE_URL, [], exec.signal);
+        add('网络 / 证书 / 代理探测', info.ok,
+          info.ok ? `可探测小文件${info.size !== undefined ? `（${info.size} 字节）` : ''}`
+            : `探测失败：${info.reason}`,
+          info.ok ? undefined : '可能是网络不通、代理配置错误，或证书校验失败（见 failure attribution）。');
+      } catch (error) {
+        add('网络 / 证书 / 代理探测', false, `探测异常：${String(error?.message ?? error)}`);
+      }
+
+      // ④ session downloads folder writable
+      const dir = workspaceDownloads(ctx, exec);
+      if (dir === '') {
+        add('下载目录可写', false, '无法在项目工作目录下创建 downloads 文件夹。', '检查会话工作目录权限。');
+      } else {
+        const probeFile = path.join(dir, `.ghost-doctor-${process.pid}-${Date.now()}.tmp`);
+        try {
+          writeFileSync(probeFile, 'ok');
+          unlinkSync(probeFile);
+          add('下载目录可写', true, `${dir} 可写。`);
+        } catch (error) {
+          try { unlinkSync(probeFile); } catch { /* best effort */ }
+          add('下载目录可写', false, `${dir} 不可写：${String(error?.message ?? error)}`,
+            '改用 dir 指定一个可写目录，或检查文件系统权限。');
+        }
+      }
+
+      // ⑤ Ghost UserConfig.json cross-check
+      const userConfig = readGhostUserConfig();
+      if (userConfig.error) {
+        add('Ghost 用户配置交叉检查', false, userConfig.error,
+          '该项只读，失败不影响下载；可手动检查 %LOCALAPPDATA%\\GhostDownloader\\UserConfig.json。');
+      } else {
+        const parts = [];
+        let ok = true;
+        if (userConfig.downloadFolder) {
+          parts.push(`下载目录=${userConfig.downloadFolder}`);
+          // If Ghost points at a different folder from our default, note the split
+          // so the user is not surprised the files land outside the workspace.
+          if (dir !== '' && path.resolve(userConfig.downloadFolder) !== path.resolve(dir)) {
+            parts.push('与插件默认下载目录不同');
+          }
+        } else {
+          parts.push('下载目录未设置');
+        }
+        if (userConfig.proxyServer) parts.push(`代理=${userConfig.proxyServer}`);
+        else parts.push('代理未设置');
+        add('Ghost 用户配置交叉检查', ok, parts.join('；'),
+          userConfig.downloadFolder && dir !== '' && path.resolve(userConfig.downloadFolder) !== path.resolve(dir)
+            ? 'Ghost 会按自己的目录归档；要读回文件请用 dir 指定同一目录。'
+            : undefined);
+      }
+
+      return { checks };
     },
   });
 

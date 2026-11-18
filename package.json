@@ -3,7 +3,25 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Drive Ghost Downloader through its official ghd CLI: add, probe, list, inspect, pause, resume, remove, and wait for downloads.",
+  "description": "DeepSeek Harness plugin that drives Ghost Downloader via its official ghd CLI: add, probe, list, inspect, pause, resume, remove, and wait for downloads.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "ghost-downloader",
+    "ghd",
+    "download"
+  ],
+  "license": "MIT",
+  "author": "dafeiyu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dafeiyu/dsh-ghost-download.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dafeiyu/dsh-ghost-download/issues"
+  },
+  "homepage": "https://github.com/dafeiyu/dsh-ghost-download#readme",
   "icon": "./icon.svg",
   "exports": {
     ".": "./index.js",
