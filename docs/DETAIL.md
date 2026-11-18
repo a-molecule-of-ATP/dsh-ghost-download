@@ -23,6 +23,8 @@ Prerequisite: install the `ghd` tool from Ghost Downloader's "Settings → Comma
 
 ## Where files land (the important part)
 
+![The default landing folder and the two related arguments](landing.svg)
+
 **When `dir` is omitted, downloads land in a `downloads` folder inside the current session working directory.** This is the single most important fact to know: Ghost's own download folder sits outside the workspace, where the agent's file tools cannot reach it. Landing in the session directory means the agent can open, parse and process the file in the very next step.
 
 Same-named files are kept by default (keep); overwriting requires an explicit `conflict: "overwrite"`.
@@ -64,6 +66,8 @@ Retry every failed task (`retry` with no `taskIds` means all failed tasks):
 ```
 
 ## Background watching and notification
+
+![What happens after a submission](timing.svg)
 
 By default a submission returns immediately with the task ids, and the plugin keeps watching those tasks in the background; when one finishes or fails, it proactively reports the result back to the session that started it — no polling needed. Watching is not infinite: if a single task is still running after `watchLimitMinutes` (a config setting, default 30 minutes), the plugin stops watching and notifies the session; use `ghost_task` to check manually then. When you need the file on the spot, use `waitSeconds` or `ghost_wait` for a synchronous wait (`ghost_wait` defaults to at most 600 seconds).
 
