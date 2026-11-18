@@ -2,11 +2,13 @@
 
 这个插件把 DeepSeek Harness 里的下载任务，交给本机 Ghost Downloader 的官方命令行工具 `ghd` 执行，让智能体和桌面端共用同一个下载队列。
 
+> **术语说明**：下文「参数」指智能体每次调用工具时传的值，例如 `dir`、`conflict`、`headers`、`waitSeconds`、`precheck`、`useGhostFolder`——`dir` 是参数，不是用户开关。「设置」指你在插件页配置、跨调用生效的值，例如 `ghdPath`、`allowedUrlSchemes`、`controlRemoveEnabled`、`waitLimitSeconds`（上限）。
+
 ## 它解决什么问题
 
 让智能体自己用 `curl`/`wget` 拉文件，看似直接，实则麻烦多多：进度看不到、断点续传和失败重试要自己实现、任务散落在各个会话里无从管理、下载完的文件还常常落在智能体读不到的地方。Ghost Downloader 是专门干这件事的工具——统一队列、断点续传、状态可查、完成后可通知。本插件让智能体只需说一句「下载这个链接」，剩下的交给 Ghost，并在下载结束时把结果送回当前会话。
 
-前提：先在 Ghost Downloader 的「设置 → 命令行工具」安装 `ghd`；也可在本插件配置里用 `ghdPath` 指定可执行文件路径。
+前提：先在 Ghost Downloader 的「设置 → 命令行工具」安装 `ghd`；也可在本插件的设置里用 `ghdPath` 指定可执行文件路径。
 
 ## 八个工具一览
 
@@ -23,7 +25,9 @@
 
 ## 文件落在哪里（最重要）
 
-![默认落点与相关参数](landing.svg)
+![默认落点与相关参数](landing.zh.svg)
+
+`dir` 与 `useGhostFolder` 都是**智能体每次调用时传的参数**，不是用户在插件页配的开关。
 
 **不传 `dir` 时，下载默认落到当前会话工作目录的 `downloads` 文件夹。** 这是最影响使用的一点：Ghost 自己的下载目录在工作区之外，智能体的文件工具读不到；落到会话目录里，智能体才能在下一步直接打开、解析、处理刚下载的文件。
 
@@ -67,15 +71,15 @@
 
 ## 后台与通知
 
-![提交之后发生什么](timing.svg)
+![提交之后发生什么](timing.zh.svg)
 
-默认提交后立即返回任务 id，插件会在后台持续监视这些任务；当任务结束或失败时，主动把结果送回发起下载的会话，无需智能体反复轮询。监视不是无限期的：单个任务超过 `watchLimitMinutes`（配置，默认 30 分钟）仍未结束，插件会停止监视并通知会话，此时可用 `ghost_task` 手动查看。需要当场拿到文件时，用 `waitSeconds` 或 `ghost_wait` 同步等待（`ghost_wait` 默认最多 600 秒）。
+默认提交后立即返回任务 id，插件会在后台持续监视这些任务；当任务结束或失败时，主动把结果送回发起下载的会话，无需智能体反复轮询。监视不是无限期的：单个任务超过 `watchLimitMinutes`（设置，默认 30 分钟）仍未结束，插件会停止监视并通知会话，此时可用 `ghost_task` 手动查看。需要当场拿到文件时，用 `waitSeconds` 或 `ghost_wait` 同步等待（`ghost_wait` 默认最多 600 秒）。
 
 ## 安全与边界
 
 - 插件会拦截 `curl -o` / `curl -O` / `wget` 这类绕过 Ghost 的 shell 下载，并引导改用 `ghost_download`。
 - `allowedUrlSchemes` 是协议白名单，默认允许 http、https、ftp、magnet、ed2k；不在名单里的链接直接拒绝。
-- `ghost_control` 的 `remove` 会删除任务；加上 `deleteFiles: true` 还会删除该任务已产生的文件，属于破坏性操作。可用 `controlRemoveEnabled` 配置在插件页关闭 remove。
+- `ghost_control` 的 `remove` 会删除任务；加上 `deleteFiles: true` 还会删除该任务已产生的文件，属于破坏性操作。可用 `controlRemoveEnabled` 设置在插件页关闭 remove。
 - `headers` 会进入 `ghd` 的命令行参数，本机进程列表可见；不要把敏感凭据写在这里。
 
 ## 诊断

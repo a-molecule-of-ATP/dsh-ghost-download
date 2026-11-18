@@ -2,11 +2,13 @@
 
 This plugin routes downloads in DeepSeek Harness through Ghost Downloader's official command-line tool `ghd`, so the agent and your desktop share one download queue.
 
+> **Terminology**: below, "arguments" are values the agent passes on each tool call, such as `dir`, `conflict`, `headers`, `waitSeconds`, `precheck`, `useGhostFolder` — `dir` is an argument, not a user toggle. "Settings" are values you configure on the plugin page that apply across calls, such as `ghdPath`, `allowedUrlSchemes`, `controlRemoveEnabled`, `waitLimitSeconds` (a ceiling).
+
 ## What problem it solves
 
 Letting an agent fetch files with `curl`/`wget` looks easy but causes real trouble: no progress to inspect, resume and retry logic you must build yourself, tasks scattered across sessions with no central view, and files that often land somewhere the agent cannot read. Ghost Downloader is built for exactly this — one unified queue, resume support, inspectable state, and completion notification. With this plugin the agent just says "download this link"; Ghost does the rest, and the result is reported back to the current session when the download ends.
 
-Prerequisite: install the `ghd` tool from Ghost Downloader's "Settings → Command line tools"; you can also set `ghdPath` in this plugin's config to point at another executable.
+Prerequisite: install the `ghd` tool from Ghost Downloader's "Settings → Command line tools"; you can also set `ghdPath` in this plugin's settings to point at another executable.
 
 ## The eight tools at a glance
 
@@ -24,6 +26,8 @@ Prerequisite: install the `ghd` tool from Ghost Downloader's "Settings → Comma
 ## Where files land (the important part)
 
 ![The default landing folder and the two related arguments](landing.svg)
+
+Both `dir` and `useGhostFolder` are **arguments the agent passes on each call**, not toggles the user sets on the plugin page.
 
 **When `dir` is omitted, downloads land in a `downloads` folder inside the current session working directory.** This is the single most important fact to know: Ghost's own download folder sits outside the workspace, where the agent's file tools cannot reach it. Landing in the session directory means the agent can open, parse and process the file in the very next step.
 
@@ -69,7 +73,7 @@ Retry every failed task (`retry` with no `taskIds` means all failed tasks):
 
 ![What happens after a submission](timing.svg)
 
-By default a submission returns immediately with the task ids, and the plugin keeps watching those tasks in the background; when one finishes or fails, it proactively reports the result back to the session that started it — no polling needed. Watching is not infinite: if a single task is still running after `watchLimitMinutes` (a config setting, default 30 minutes), the plugin stops watching and notifies the session; use `ghost_task` to check manually then. When you need the file on the spot, use `waitSeconds` or `ghost_wait` for a synchronous wait (`ghost_wait` defaults to at most 600 seconds).
+By default a submission returns immediately with the task ids, and the plugin keeps watching those tasks in the background; when one finishes or fails, it proactively reports the result back to the session that started it — no polling needed. Watching is not infinite: if a single task is still running after `watchLimitMinutes` (a setting, default 30 minutes), the plugin stops watching and notifies the session; use `ghost_task` to check manually then. When you need the file on the spot, use `waitSeconds` or `ghost_wait` for a synchronous wait (`ghost_wait` defaults to at most 600 seconds).
 
 ## Safety and boundaries
 

@@ -2,6 +2,8 @@
 
 让 DeepSeek Harness 智能体通过 Ghost Downloader 官方命令行工具 `ghd` 统一管理下载（添加 / 探测 / 查看 / 控制 / 等待 / 统计 / 体检）的 DSH 插件。它让「下载」这件事只有一个引擎，IDA 与桌面端共享同一个下载队列。
 
+> **术语说明**：下文「参数」指智能体每次调用工具时传的值，例如 `dir`、`conflict`、`headers`、`waitSeconds`、`precheck`、`useGhostFolder`——`dir` 是参数，不是用户开关。「设置」指你在插件页配置、跨调用生效的值，例如 `ghdPath`、`allowedUrlSchemes`、`controlRemoveEnabled`、`waitLimitSeconds`（上限）。
+
 ## 它提供什么
 
 向智能体注册 **8 个工具**（全部走 `ghd` CLI，而非受限的 aria2 RPC）：
@@ -20,7 +22,7 @@
 - **侧边栏「Ghost 下载队列」面板**：在 Web 客户端右侧显示实时下载进度（每 5 秒轮询一份缓存 3 秒的队列快照），跟随 Ghost 桌面端同一队列。
 - **Shell 下载拦截**：默认拒绝 `curl -o` / `curl -O` / `wget` 这类自己写文件的 shell 下载，并把模型引导到 `ghost_download`（可由 `blockShellDownloads` 关闭）。这是行为护栏，不是安全边界。
 
-它带**设置页**，提供执行器路径、轮询间隔、协议白名单、等待上限、输出上限、以及 remove / 通知 / shell 拦截等开关。
+它带**设置页**，提供执行器路径、轮询间隔、协议白名单、等待上限、输出上限、以及 remove / 通知 / shell 拦截等设置。
 
 ## 安装（本地 bundle）
 
@@ -42,11 +44,11 @@
 
 `id` 是 Loader 行 id，`name` 必须与 `package.json` 的 `name` 一致。装好后可在插件页用 `ghdPath` 指向 `ghd.exe`（默认依次探测 `GHOST_GHD` / `GHD_PATH` 环境变量、标准安装目录、最后交给 `PATH`）。
 
-## 配置项
+## 设置项
 
 与 `index.js` 中的 `Config`（Schemastery schema）完全一致，共 12 项；全部为 `.volatile()`，保存后立即生效，无需重启插件：
 
-| 字段 | 类型 | 默认值 | 说明 |
+| 字段 | 类型 | 缺省值 | 说明 |
 |---|---|---|---|
 | `enabled` | boolean | `true` | 关闭后不注册任何 `ghost_*` 工具；其余设置保留。 |
 | `ghdPath` | string | `""` | `ghd.exe` 路径；留空自动探测标准安装。 |
@@ -89,4 +91,4 @@ MIT © 2026 dafeiyu。详见 [LICENSE](LICENSE)。
 
 ---
 
-**English summary:** A DeepSeek Harness plugin that drives Ghost Downloader through its official `ghd` CLI. It registers eight model tools — `ghost_download`, `ghost_probe`, `ghost_tasks`, `ghost_task`, `ghost_control`, `ghost_wait`, `ghost_stats`, and `ghost_doctor` — and adds a live download-queue sidebar plus a guard that redirects shell downloads. `ghost_control` gains a `retry` action; new download options include `useGhostFolder`, `precheck`, `conflict` (default keep), and `waitSeconds`; omits `dir` to save under `<session>/downloads`. Twelve volatile settings cover the executable path, protocol allow-list, wait/output limits, and safety toggles. It vendors Schemastery/Cosmokit for link installs and is licensed MIT.
+**English summary:** A DeepSeek Harness plugin that drives Ghost Downloader through its official `ghd` CLI. It registers eight model tools — `ghost_download`, `ghost_probe`, `ghost_tasks`, `ghost_task`, `ghost_control`, `ghost_wait`, `ghost_stats`, and `ghost_doctor` — and adds a live download-queue sidebar plus a guard that redirects shell downloads. `ghost_control` gains a `retry` action; new per-call arguments include `useGhostFolder`, `precheck`, `conflict` (default keep), and `waitSeconds`; omitting the `dir` argument saves under `<session>/downloads`. Twelve volatile settings cover the executable path, protocol allow-list, wait/output limits, and safety settings. It vendors Schemastery/Cosmokit for link installs and is licensed MIT.

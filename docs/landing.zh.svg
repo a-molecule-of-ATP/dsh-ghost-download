@@ -1,0 +1,30 @@
+<svg width="1280" height="520" viewBox="0 0 1280 520" fill="none" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, 'Microsoft YaHei', sans-serif">
+  <!-- 左：Ghost 自己的目录 -->
+  <rect x="80" y="72" width="520" height="248" rx="16" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="108" y="112" font-size="15" fill="#8b93a7">Ghost 自己的目录</text>
+  <text x="108" y="158" font-size="17" fill="#dfe4ee">C:\Users\&lt;你&gt;\Downloads</text>
+  <rect x="108" y="184" width="200" height="42" rx="21" fill="#3a1f27" stroke="#e0556a" stroke-width="2" />
+  <text x="208" y="211" text-anchor="middle" font-size="14" fill="#f0909f">在工作区之外</text>
+  <text x="108" y="262" font-size="14" fill="#8b93a7">智能体打不开自己下的文件</text>
+  <text x="108" y="290" font-size="13" fill="#6b7a99">→ 想让文件落在这里：传 useGhostFolder: true</text>
+
+  <!-- 右：会话工作区 -->
+  <rect x="680" y="72" width="520" height="248" rx="16" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="708" y="112" font-size="15" fill="#8b93a7">会话工作区</text>
+  <text x="708" y="158" font-size="17" fill="#dfe4ee">&lt;工作目录&gt;/downloads</text>
+  <rect x="708" y="184" width="200" height="42" rx="21" fill="#17301f" stroke="#4cc38a" stroke-width="2" />
+  <text x="808" y="211" text-anchor="middle" font-size="14" fill="#7fdba8">在工作区之内</text>
+  <text x="708" y="262" font-size="14" fill="#8b93a7">用普通文件工具就能读回</text>
+  <text x="708" y="290" font-size="13" fill="#6b7a99">→ 不传 dir 时的默认落点</text>
+
+  <!-- 智能体每次调用传的参数 -->
+  <text x="640" y="368" text-anchor="middle" font-size="15" fill="#8b93a7">以下是智能体每次调用时传的参数</text>
+
+  <rect x="220" y="392" width="380" height="76" rx="14" fill="#1b2437" stroke="#2f4a6d" stroke-width="2" />
+  <text x="410" y="424" text-anchor="middle" font-size="16" fill="#a9c2e6">dir</text>
+  <text x="410" y="450" text-anchor="middle" font-size="13" fill="#8b93a7">指定这一单的落点</text>
+
+  <rect x="680" y="392" width="380" height="76" rx="14" fill="#1b2437" stroke="#2f4a6d" stroke-width="2" />
+  <text x="870" y="424" text-anchor="middle" font-size="16" fill="#a9c2e6">useGhostFolder</text>
+  <text x="870" y="450" text-anchor="middle" font-size="13" fill="#8b93a7">把归档交回 Ghost</text>
+</svg>
