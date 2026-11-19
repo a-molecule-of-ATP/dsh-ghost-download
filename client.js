@@ -5,6 +5,18 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const { useEffect, useState } = React;
 
+    /**
+     * FROZEN (2026-11-19): the conversation card and the composer strip are built
+     * but their browser rendering was never verified (the GUI needs an
+     * authenticated URL this session could not open). The card also REPLACES the
+     * generic `ghost_download` tool row, so a wrong prop assumption would break
+     * every download row — too much release risk for an unverified surface.
+     *
+     * Flip to `true` to re-enable; the implementation and its host routes are
+     * intact. See PLAN-DOWNLOAD-UI.md for the open question.
+     */
+    const DOWNLOAD_UI_ENABLED = false;
+
     /** One id for the better-sidebar descriptor, the native kind and the slot key. */
     const TAB_ID = 'ghost-downloads';
     /**
@@ -1196,7 +1208,7 @@ window.__ModuleLoader__.load({
           ownerForm = undefined;
         }
         // ── conversation UI (user-facing only, never sent to the model) ──
-        if (typeof ctx.slots?.inject === 'function') {
+        if (DOWNLOAD_UI_ENABLED && typeof ctx.slots?.inject === 'function') {
           try {
             ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
               name: 'conversation.composer.dock',
