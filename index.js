@@ -846,6 +846,17 @@ async function hashFile(filePath, algorithm) {
   return hash.digest('hex');
 }
 
+/** Protocol label shown to the user for a submitted link. */
+function protocolOf(url) {
+  const text = String(url ?? '').trim();
+  const scheme = (/^([a-z][a-z0-9+.-]*):/i.exec(text)?.[1] ?? '').toLowerCase();
+  // HLS and DASH ride on http(s); saying "https" alone would misdescribe them.
+  const path = text.split('?')[0].split('#')[0].toLowerCase();
+  if (path.endsWith('.m3u8')) return { scheme, kind: 'HLS' };
+  if (path.endsWith('.mpd')) return { scheme, kind: 'DASH' };
+  return { scheme, kind: undefined };
+}
+
 /** Return the offending shell segment when a command downloads a URL to a file itself. */
   function shellDownloadOf(command) {
     if (typeof command !== 'string' || command === '') return undefined;
@@ -1122,6 +1133,34 @@ async function hashFile(filePath, algorithm) {
     return path.join(folder, name);
   }
 
+  /**
+   * What was submitted, and in which turn.
+   *
+   * The conversation card has to answer "these downloads came from this turn", and
+   * the only shared coordinate between a tool call and the client's turn component
+   * is the session's event sequence: `session.log` events carry `seq`, and the turn
+   * card receives `turn.start.seq` / `turn.end.seq`. Recording the last seq at
+   * submit time is enough to place the card exactly.
+   *
+   * Nothing here is persisted; a restart simply loses the cards of old turns.
+   */
+  const SUBMISSION_CAP = 100;
+  const submissions = [];
+  const recordSubmission = (agent, items) => {
+    const session = agent?.session;
+    const sessionId = typeof session?.id === 'string' ? session.id : '';
+    if (sessionId === '' || items.length === 0) return;
+    const log = session?.log;
+    const seq = Array.isArray(log) && log.length > 0 ? log[log.length - 1]?.seq : undefined;
+    submissions.push({
+      sessionId,
+      ...(Number.isFinite(seq) ? { seq } : {}),
+      at: Date.now(),
+      items,
+    });
+    while (submissions.length > SUBMISSION_CAP) submissions.shift();
+  };
+
   // Read-only queue snapshot for the sidebar pane and the composer-dock card.
   // Registered BEFORE the `enabled` early return: the browser half always mounts
   // its tab, so a disabled plugin must keep answering this route instead of
@@ -1228,6 +1267,32 @@ async function hashFile(filePath, algorithm) {
         });
       },
     }), 'ghost-download:snapshot-route');
+    // What this session submitted, keyed by event seq, so the conversation card can
+    // place itself under the turn that submitted it. Read-only; the URL is shown to
+    // the user in their own browser and never travels back to the model.
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/plugin/ghost-download/submissions',
+      resource: async (request) => {
+        const url = new URL(request?.url ?? 'http://localhost/');
+        const sessionId = url.searchParams.get('session') ?? '';
+        const from = Number(url.searchParams.get('from'));
+        const to = Number(url.searchParams.get('to'));
+        const entries = sessionId === ''
+          ? []
+          : submissions.filter((entry) => {
+            if (entry.sessionId !== sessionId) return false;
+            if (!Number.isFinite(entry.seq)) return false;
+            if (Number.isFinite(from) && entry.seq < from) return false;
+            if (Number.isFinite(to) && entry.seq > to) return false;
+            return true;
+          });
+        return new Response(JSON.stringify({ entries }), {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+        });
+      },
+    }), 'ghost-download:submissions-route');
   }
 
   // `enabled: false` keeps the row's settings but publishes no tools.
@@ -1471,6 +1536,20 @@ async function hashFile(filePath, algorithm) {
         ? submitted.result.filter((item) => item === null || typeof item !== 'object' || !item.error)
         : [];
       const taskIds = findTaskIds(accepted);
+      // Remember what this turn submitted, so the client can put a card under it.
+      // Done before any early return: a fire-and-forget batch needs the card most.
+      recordSubmission(exec.agent, accepted
+        .filter((item) => item && typeof item === 'object' && typeof item.taskId === 'string')
+        .map((item) => {
+          const protocol = protocolOf(item.url);
+          return {
+            taskId: item.taskId,
+            url: typeof item.url === 'string' ? item.url : '',
+            name: typeof item.name === 'string' ? item.name : '',
+            scheme: protocol.scheme,
+            ...(protocol.kind === undefined ? {} : { kind: protocol.kind }),
+          };
+        }));
       const waitSeconds = Number.isInteger(args.waitSeconds) ? args.waitSeconds : 0;
 
       if (!submitted.ok || waitSeconds <= 0 || taskIds.length === 0) {

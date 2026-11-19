@@ -353,7 +353,255 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ── shared download state ───────────────────────────────────────────────
+    // The composer strip and the conversation card show the same queue, so they
+    // share ONE poller. Polling from each component would spawn `ghd tasks` twice
+    // as often for the same data.
+    const TERMINAL_STATUS = new Set(['completed', 'failed', 'removed', 'error']);
+    const isActiveTask = (task) => !TERMINAL_STATUS.has(String(task?.status ?? '').toLowerCase());
+
+    const shared = {
+      tasks: [],
+      at: 0,
+      paneVisible: false,
+      listeners: new Set(),
+      timer: null,
+    };
+    const notifyShared = () => {
+      for (const listener of [...shared.listeners]) {
+        try {
+          listener();
+        } catch {
+          // A broken subscriber must not stop the others.
+        }
+      }
+    };
+    const setPaneVisible = (visible) => {
+      if (shared.paneVisible === visible) return;
+      shared.paneVisible = visible === true;
+      notifyShared();
+    };
+    async function refreshSharedTasks() {
+      try {
+        const response = await fetch('/plugin/ghost-download/tasks', { credentials: 'same-origin' });
+        const data = await response.json();
+        shared.tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+        shared.at = Date.now();
+      } catch {
+        // Keep the last known snapshot; a failed poll is not "nothing is running".
+      }
+      notifyShared();
+    }
+    /**
+     * Subscribe to the shared queue.
+     *
+     * The poller runs only while at least one component is mounted AND the page is
+     * visible; the host caches the route, but a hidden tab should not keep asking.
+     */
+    function useSharedTasks() {
+      const [, force] = useState(0);
+      useEffect(() => {
+        const listener = () => force((n) => n + 1);
+        shared.listeners.add(listener);
+        if (shared.timer === null) {
+          const tick = () => {
+            if (document.visibilityState === 'visible') refreshSharedTasks();
+          };
+          shared.timer = setInterval(tick, 2500);
+          tick();
+        }
+        return () => {
+          shared.listeners.delete(listener);
+          if (shared.listeners.size === 0 && shared.timer !== null) {
+            clearInterval(shared.timer);
+            shared.timer = null;
+          }
+        };
+      }, []);
+      return shared.tasks;
+    }
+
+    const STRIP_COLLAPSED_KEY = 'ghost-download:strip-collapsed';
+    const readStripCollapsed = () => {
+      try {
+        return window.localStorage.getItem(STRIP_COLLAPSED_KEY) === '1';
+      } catch {
+        return false;
+      }
+    };
+    const writeStripCollapsed = (value) => {
+      try {
+        window.localStorage.setItem(STRIP_COLLAPSED_KEY, value ? '1' : '0');
+      } catch {
+        // storage disabled: the choice simply does not persist
+      }
+    };
+
+    /** Aggregate the queue into the three numbers the strip shows. */
+    function summarise(tasks) {
+      const active = tasks.filter(isActiveTask);
+      if (active.length === 0) return null;
+      const withBytes = active.filter((task) => Number.isFinite(task?.receivedBytes) && Number.isFinite(task?.fileSize) && task.fileSize > 0);
+      const progress = withBytes.length > 0
+        // Weighted by size, so a 4 GB file at 10% does not read like a 4 KB one at 100%.
+        ? Math.round(withBytes.reduce((sum, t) => sum + (t.receivedBytes / t.fileSize), 0) / withBytes.length * 100)
+        : Math.round(active.reduce((sum, t) => sum + (Number(t?.progress) || 0), 0) / active.length);
+      const speed = active.reduce((sum, task) => sum + (Number(task?.speedBps) || 0), 0);
+      return { count: active.length, progress, speed };
+    }
+    const formatSpeed = (bytesPerSecond) => {
+      if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '';
+      const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+      let value = bytesPerSecond;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+    };
+
+    /** The thin strip above the composer. User-facing only; the model never sees it. */
+    function ComposerStrip() {
+      const tasks = useSharedTasks();
+      const [collapsed, setCollapsed] = useState(readStripCollapsed);
+      const summary = summarise(tasks);
+      // The sidebar pane shows the same queue in full; showing both is noise.
+      if (summary === null || shared.paneVisible) return null;
+      const toggle = () => {
+        const next = !collapsed;
+        setCollapsed(next);
+        writeStripCollapsed(next);
+      };
+      const bar = h('div', {
+        key: 'bar',
+        style: {
+          height: 3, borderRadius: 2, overflow: 'hidden',
+          background: 'var(--dsw-alias-border-l1)',
+        },
+      }, h('div', {
+        style: {
+          width: `${Math.max(0, Math.min(100, summary.progress))}%`,
+          height: '100%',
+          background: 'var(--dsw-alias-brand-primary)',
+          transition: 'width 300ms ease-out',
+        },
+      }));
+      const speedText = formatSpeed(summary.speed);
+      const label = collapsed
+        ? `⬇ ${summary.count}`
+        : `⬇ ${summary.count} 项下载中 · ${summary.progress}%${speedText ? ` · ${speedText}` : ''}`;
+      return h('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: collapsed ? '2px 10px' : '6px 10px',
+          margin: '0 0 6px',
+          borderRadius: 8,
+          border: '1px solid var(--dsw-alias-border-l1)',
+          background: 'var(--dsw-alias-bg-layer-2)',
+          fontSize: 12,
+          color: 'var(--dsw-alias-label-secondary)',
+        },
+      }, [
+        h('span', { key: 't', style: { whiteSpace: 'nowrap' } }, label),
+        collapsed ? null : h('div', { key: 'b', style: { flex: 1, minWidth: 60 } }, bar),
+        h('button', {
+          key: 'c',
+          type: 'button',
+          title: collapsed ? '展开下载条' : '折叠下载条（不影响下载）',
+          'aria-label': collapsed ? '展开下载条' : '折叠下载条',
+          onClick: toggle,
+          style: {
+            flexShrink: 0, border: 'none', background: 'transparent', cursor: 'pointer',
+            color: 'var(--dsw-alias-label-secondary)', fontSize: 12, padding: '0 2px',
+            fontFamily: 'inherit',
+          },
+        }, collapsed ? '▸' : '▾'),
+      ]);
+    }
+
+    /**
+     * The card under the turn that actually submitted the download.
+     *
+     * Placement uses the session event sequence: this plugin records the last event
+     * seq at submit time, and the turn component is given `turn.start.seq` /
+     * `turn.end.seq`. Nothing is guessed from timestamps.
+     */
+    function TurnDownloadCard(props) {
+      const sessionId = props?.sessionId;
+      const from = props?.turn?.start?.seq;
+      const to = props?.turn?.end?.seq;
+      const tasks = useSharedTasks();
+      const [entries, setEntries] = useState(null);
+
+      useEffect(() => {
+        if (typeof sessionId !== 'string' || sessionId === '') return undefined;
+        if (!Number.isFinite(from) || !Number.isFinite(to)) return undefined;
+        let alive = true;
+        const query = `session=${encodeURIComponent(sessionId)}&from=${from}&to=${to}`;
+        fetch(`/plugin/ghost-download/submissions?${query}`, { credentials: 'same-origin' })
+          .then((response) => response.json())
+          .then((data) => {
+            if (alive) setEntries(Array.isArray(data?.entries) ? data.entries : []);
+          })
+          .catch(() => {
+            if (alive) setEntries([]);
+          });
+        return () => { alive = false; };
+      }, [sessionId, from, to]);
+
+      if (entries === null || entries.length === 0) return null;
+      const items = entries.flatMap((entry) => (Array.isArray(entry.items) ? entry.items : []));
+      if (items.length === 0) return null;
+      const byId = new Map(tasks.map((task) => [task.id, task]));
+      const statuses = items.map((item) => String(byId.get(item.taskId)?.status ?? '').toLowerCase());
+      const finished = statuses.every((status) => status === 'completed');
+      const failed = statuses.filter((status) => status === 'failed').length;
+      const headline = finished
+        ? `✓ 下载完成 · ${items.length} 项`
+        : failed > 0
+          ? `下载中 · ${items.length} 项（${failed} 项失败）`
+          : `⬇ 下载中 · ${items.length} 项`;
+      const cell = { padding: '5px 8px', borderTop: '1px solid var(--dsw-alias-border-l1)' };
+      return h('div', {
+        style: {
+          marginTop: 8,
+          border: '1px solid var(--dsw-alias-border-l1)',
+          borderRadius: 10,
+          overflow: 'hidden',
+          fontSize: 12,
+          background: 'var(--dsw-alias-bg-layer-2)',
+          color: 'var(--dsw-alias-label-secondary)',
+        },
+      }, [
+        h('div', {
+          key: 'h',
+          style: { padding: '7px 10px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
+        }, headline),
+        h('table', { key: 't', style: { width: '100%', borderCollapse: 'collapse' } }, [
+          h('tbody', { key: 'b' }, items.slice(0, 5).map((item, index) => h('tr', { key: item.taskId ?? index }, [
+            h('td', { key: 'n', style: { ...cell, color: 'var(--dsw-alias-label-primary)', wordBreak: 'break-all' } },
+              item.name || '（等待 Ghost 命名）'),
+            h('td', { key: 'u', style: { ...cell, wordBreak: 'break-all' } }, item.url || ''),
+            h('td', { key: 'p', style: { ...cell, whiteSpace: 'nowrap' } },
+              item.kind ? `${item.scheme} · ${item.kind}` : (item.scheme || '')),
+          ]))),
+        ]),
+        items.length > 5
+          ? h('div', { key: 'm', style: { padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)' } },
+            `还有 ${items.length - 5} 项`)
+          : null,
+      ]);
+    }
+
     function Pane(props) {
+      // The sidebar and the strip show the same queue; the pane announces itself so
+      // the strip can step aside instead of duplicating it.
+      const visible = props && props.visible === true;
+      useEffect(() => {
+        setPaneVisible(visible);
+        return () => setPaneVisible(false);
+      }, [visible]);
       return h(PaneBoundary, null, h(QueuePane, { visible: props && props.visible }));
     }
 
@@ -907,6 +1155,28 @@ window.__ModuleLoader__.load({
         } catch {
           ownerForm = undefined;
         }
+        // ── conversation UI (user-facing only, never sent to the model) ──
+        if (typeof ctx.slots?.inject === 'function') {
+          try {
+            ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+              name: 'conversation.composer.dock',
+              id: 'ghost-download-strip',
+              order: 20,
+            }, ComposerStrip));
+          } catch (error) {
+            console.warn('[ghost-download] composer strip registration failed:', error);
+          }
+          try {
+            ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+              name: 'conversation.chat.turnTail',
+              id: 'ghost-download-turn',
+              order: 20,
+            }, TurnDownloadCard));
+          } catch (error) {
+            console.warn('[ghost-download] turn card registration failed:', error);
+          }
+        }
+
         if (ownerForm !== undefined && typeof ctx.slots?.inject === 'function') {
           ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
             name: 'plugins.row.config',
