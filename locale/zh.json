@@ -2,6 +2,6 @@
   "meta": {
     "title": "Ghost Downloader 下载",
     "detail": "docs/DETAIL.zh.md",
-    "description": "把 DSH 的下载交给本机 Ghost Downloader（官方 ghd 命令行工具），与桌面端共用同一个队列：提交链接（HTTP/HTTPS、FTP、磁力/BT、eD2k、HLS/DASH）、预览链接内容、查看队列与单个任务（附失败归因）、暂停/继续/重试/移除，也可同步等待任务结束。提交前可以用 precheck 预检剩余空间与同名文件，想让 Ghost 按自己的分类规则归档就用 useGhostFolder。最关键的一点：不传 dir 时，文件默认落在当前会话工作目录下的 downloads 文件夹，而不是 Ghost 自己的下载目录，这样智能体下完就能直接读；同名文件默认保留，覆写需要显式指定。默认提交后立即返回，插件在后台监视这些任务，结束或失败时主动把结果送回当前会话。还会拦截 curl -o / curl -O / wget 这类绕过 Ghost 的 shell 下载，并引导改用 ghost_download。另外提供 ghost_stats 汇总当前可见任务、ghost_doctor 只读体检 ghd、网络与目录。使用前提：先在 Ghost Downloader 的「设置 → 命令行工具」安装 ghd；也可以用 ghdPath 指定可执行文件路径；关闭插件后这些工具即被移除。"
+    "description": "把 DSH 的下载交给本机 Ghost Downloader（官方 ghd 命令行工具），与桌面端共用同一个队列：提交链接（HTTP/HTTPS、FTP、磁力/BT、eD2k、HLS/DASH）、预览链接内容、查看队列与单个任务（附失败归因）、暂停/继续/重试/移除，也可同步等待任务结束。提交前可以用 precheck 预检剩余空间与同名文件，想让 Ghost 按自己的分类规则归档就用 useGhostFolder。最关键的一点：不传 dir 时，文件默认落在当前会话工作目录下的 downloads 文件夹，而不是 Ghost 自己的下载目录，这样智能体下完就能直接读；同名文件默认保留，覆写需要显式指定。默认提交后立即返回，插件在后台监视这些任务，结束或失败时主动把结果送回当前会话。还会拦截 curl -o / curl -O / wget 这类绕过 Ghost 的 shell 下载，并引导改用 ghost_download。另外提供 ghost_stats 汇总当前可见任务、ghost_doctor 只读体检 ghd、网络与目录。使用前提：先在 Ghost Downloader 的「设置 → 命令行工具」安装 ghd；也可以用 ghdPath 指定可执行文件路径；关闭插件后这些工具即被移除。ghost_wait 可传 checksum（md5 / sha1 / sha256 / sha512，或按长度识别的裸十六进制摘要）在下载完成后校验落地文件，不匹配即判失败——ghd 本身没有校验和功能，哈希由插件自己流式计算。"
   }
 }

@@ -7,8 +7,8 @@
  * addUri + getVersion, which cannot answer "is this download finished".
  */
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statfsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statfsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Schema from '@deepseek-ai/schemastery';
@@ -173,6 +173,8 @@ const TOOL_OUTPUT_SCHEMA = {
     /** Untrimmed count when a `limit` shortened `result`; declared because the
      *  schema forbids extra properties, so omitting it rejects the whole output. */
     total: { type: 'integer' },
+    /** Result of a `checksum` request on ghost_wait. */
+    checksum: {},
     precheck: {},
     attribution: {},
     waited: {},
@@ -789,7 +791,62 @@ export function apply(ctx, config) {
     }
   }
 
-  /** Return the offending shell segment when a command downloads a URL to a file itself. */
+  /**
+ * Hash algorithms we can verify locally. `ghd` has no checksum support, so the
+ * plugin computes the digest itself once the file has landed.
+ */
+const CHECKSUM_ALGORITHMS = { md5: 'md5', sha1: 'sha1', sha256: 'sha256', sha512: 'sha512' };
+/** Digest length -> algorithm, for a bare hex string with no prefix. */
+const CHECKSUM_BY_LENGTH = { 32: 'md5', 40: 'sha1', 64: 'sha256', 128: 'sha512' };
+
+/**
+ * Parse an expected checksum in the form `sha256:<hex>` (or a bare hex digest
+ * whose length identifies the algorithm).
+ *
+ * @param raw - user-supplied value.
+ * @returns `{ algorithm, expected }` or `{ error }`.
+ */
+function parseChecksum(raw) {
+  const text = String(raw).trim().toLowerCase();
+  const prefixed = /^([a-z0-9]+)\s*:\s*([0-9a-f]+)$/.exec(text);
+  if (prefixed) {
+    const algorithm = CHECKSUM_ALGORITHMS[prefixed[1]];
+    if (!algorithm) {
+      return { error: `unsupported checksum algorithm "${prefixed[1]}" (use md5, sha1, sha256 or sha512)` };
+    }
+    if (CHECKSUM_BY_LENGTH[prefixed[2].length] !== algorithm) {
+      return { error: `"${algorithm}" digest has the wrong length (${prefixed[2].length} chars)` };
+    }
+    return { algorithm, expected: prefixed[2] };
+  }
+  if (/^[0-9a-f]+$/.test(text) && CHECKSUM_BY_LENGTH[text.length] !== undefined) {
+    return { algorithm: CHECKSUM_BY_LENGTH[text.length], expected: text };
+  }
+  return {
+    error: 'use "<algorithm>:<hex>" such as sha256:abc… (md5 / sha1 / sha256 / sha512), '
+      + 'or a bare hex digest whose length identifies the algorithm',
+  };
+}
+
+/**
+ * Stream one file through a digest so a large download is never held in memory.
+ *
+ * @param filePath - file to hash.
+ * @param algorithm - node:crypto algorithm name.
+ * @returns hex digest.
+ */
+async function hashFile(filePath, algorithm) {
+  const hash = createHash(algorithm);
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
+/** Return the offending shell segment when a command downloads a URL to a file itself. */
   function shellDownloadOf(command) {
     if (typeof command !== 'string' || command === '') return undefined;
     for (const line of command.split(/\r?\n/)) {
@@ -1477,10 +1534,10 @@ export function apply(ctx, config) {
       const failure = ok ? undefined : {
         code: allCompleted ? 'detailUnavailable' : (waited.timedOut ? 'waitTimedOut' : 'notCompleted'),
         message: allCompleted
-          ? `all tasks completed but a task detail could not be read (${statuses.join(', ') || 'no status reported'})`
-          : waited.timedOut
-            ? `waited ${Math.round(plannedWaitMs / 1000)}s and the tasks were still active`
-            : `downloads did not all complete (${statuses.join(', ') || 'no status reported'})`,
+            ? `all tasks completed but a task detail could not be read (${statuses.join(', ') || 'no status reported'})`
+            : waited.timedOut
+              ? `waited ${Math.round(plannedWaitMs / 1000)}s and the tasks were still active`
+              : `downloads did not all complete (${statuses.join(', ') || 'no status reported'})`,
         statuses,
       };
       return {
@@ -1810,12 +1867,35 @@ export function apply(ctx, config) {
           type: 'integer',
           description: `Maximum seconds to block (default ${DEFAULT_WAIT_TOOL_SECONDS}, capped at ${settings().waitLimitSeconds}). On timeout the result carries timedOut: true.`,
         },
+        checksum: {
+          type: 'string',
+          description: 'Verify the downloaded file after it completes: pass "<algorithm>:<hex>" '
+            + '(md5 / sha1 / sha256 / sha512) or a bare hex digest whose length identifies the algorithm. '
+            + 'Requires exactly one taskId. ghost has no checksum support of its own, so the plugin hashes '
+            + 'the landed file itself; a mismatch turns the call into a failure.',
+        },
       },
       required: ['taskIds'],
     },
     output: {
       schema: TOOL_OUTPUT_SCHEMA,
-      render: jsonRender,
+      render: (_args, value) => {
+        const v = value && typeof value === 'object' ? value : {};
+        const blocks = jsonRender(_args, value);
+        const lines = [];
+        if (v.filePath) lines.push(`file: ${v.filePath}`);
+        if (v.checksum) {
+          const c = v.checksum;
+          lines.push(c.verified
+            ? `校验通过：${c.algorithm} ${c.expected}`
+            : `校验未通过：${c.algorithm} 期望 ${c.expected}`
+              + `${c.actual ? `，实际 ${c.actual}` : ''}${c.reason ? `（${c.reason}）` : ''}`);
+        }
+        if (lines.length > 0) {
+          blocks.push({ type: 'text', text: bounded(lines.join('\n'), settings().maxOutputChars) });
+        }
+        return blocks;
+      },
     },
     // Derived from the schema maximum for the same reason as ghost_download:
     // `timeoutMs` is fixed at registration, while the limit is read per call.
@@ -1832,7 +1912,60 @@ export function apply(ctx, config) {
         ? args.timeoutSeconds
         : DEFAULT_WAIT_TOOL_SECONDS;
       const limit = Math.min(Math.max(requested, 1), cfg.waitLimitSeconds);
-      return call(['wait', ...ids], { timeoutMs: limit * 1000, signal: exec.signal });
+      const result = await call(['wait', ...ids], { timeoutMs: limit * 1000, signal: exec.signal });
+      // Optional integrity check. `ghd` has no checksum support at all, so the
+      // digest is computed here, on the file that actually landed — which means
+      // the landing path has to be resolved first, exactly as ghost_task does.
+      if (typeof args?.checksum !== 'string' || args.checksum === '') return result;
+      if (ids.length !== 1) throw new Error('checksum requires exactly one taskId');
+      const parsed = parseChecksum(args.checksum);
+      if (parsed.error !== undefined) throw new Error(parsed.error);
+
+      const detail = await call(['task', ids[0]], { timeoutMs: TASK_TIMEOUT_MS, signal: exec.signal });
+      const task = detail.ok && detail.result && typeof detail.result === 'object' ? detail.result : {};
+      const landing = resolveLandingPath(task);
+      if (landing === undefined) {
+        return {
+          ...result,
+          ok: false,
+          filePath: undefined,
+          checksum: {
+            algorithm: parsed.algorithm, expected: parsed.expected, verified: false,
+            reason: 'could not resolve the landed file, so nothing was hashed',
+          },
+          error: { code: 'checksumNotVerified', message: 'could not resolve the landed file to hash it' },
+        };
+      }
+      try {
+        const actual = await hashFile(landing, parsed.algorithm);
+        const verified = actual === parsed.expected;
+        const checksum = {
+          algorithm: parsed.algorithm, expected: parsed.expected, actual,
+          filePath: landing, verified,
+          ...(verified ? {} : { reason: 'digest does not match the expected value' }),
+        };
+        return verified
+          ? { ...result, filePath: landing, checksum }
+          : {
+            ...result,
+            ok: false,
+            filePath: landing,
+            checksum,
+            error: {
+              code: 'checksumMismatch',
+              message: `${parsed.algorithm} digest does not match: expected ${parsed.expected}, got ${actual}`,
+            },
+          };
+      } catch (error) {
+        const reason = `could not hash the file: ${error instanceof Error ? error.message : String(error)}`;
+        return {
+          ...result,
+          ok: false,
+          filePath: landing,
+          checksum: { algorithm: parsed.algorithm, expected: parsed.expected, verified: false, reason },
+          error: { code: 'checksumNotVerified', message: reason },
+        };
+      }
     },
   });
 

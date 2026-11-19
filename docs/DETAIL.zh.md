@@ -19,7 +19,7 @@
 | `ghost_tasks` | 列出当前可见任务及状态、进度 | `status`（按状态过滤）、`limit`（限量） |
 | `ghost_task` | 查看单个任务的详情，并给出失败归因 | `taskId`（必填） |
 | `ghost_control` | 暂停、继续、重试或移除任务 | `action`（pause/start/retry/remove）、`taskIds`、`deleteFiles`（remove 时删除已产生的文件） |
-| `ghost_wait` | 同步等待任务结束并回报最终状态 | `taskIds`（必填）、`timeoutSeconds`（默认 600 秒） |
+| `ghost_wait` | 同步等待任务结束并回报最终状态，可选做完整性校验 | `taskIds`（必填）、`timeoutSeconds`（默认 600 秒）、`checksum`（校验和，要求只传一个 taskId） |
 | `ghost_stats` | 按状态汇总当前可见任务的数量与总字节数 | `range`（7d/30d/all，默认 7d） |
 | `ghost_doctor` | 只读体检 ghd、网络、目录与配置 | 无参数 |
 
@@ -71,6 +71,18 @@
 {"action": "retry"}
 ```
 
+下载完成后校验完整性（`checksum` 要求**只传一个 `taskId`**，传多个会直接报错）：
+
+```json
+{"taskIds": ["tsk_0123"], "timeoutSeconds": 300, "checksum": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}
+```
+
+`checksum` 也可以只给裸十六进制摘要，插件按长度识别算法（32=md5、40=sha1、64=sha256、128=sha512）。`ghd` 本身没有任何校验和功能，所以摘要由插件在文件落盘后自行流式计算，不会把大文件读进内存。三种结果：
+
+- 匹配 → 结果里带「校验通过：`<算法> <摘要>`」；
+- 不匹配 → `ok:false`，`error.code = "checksumMismatch"`，并列出期望值与实际值；
+- 定位不到落地文件 → `error.code = "checksumNotVerified"`。
+
 ## 后台与通知
 
 ![提交之后发生什么](timing.zh.svg)
@@ -83,6 +95,29 @@
 - `allowedUrlSchemes` 是协议白名单，默认允许 http、https、ftp、magnet、ed2k；不在名单里的链接直接拒绝。
 - `ghost_control` 的 `remove` 会移除任务，并删掉它**尚未完成**的文件；只有再加 `deleteFiles: true` 才会连已完成文件一起删。可用 `controlRemoveEnabled` 设置在插件页关闭 remove。
 - `headers` 会进入 `ghd` 的命令行参数，本机进程列表可见；不要把敏感凭据写在这里。
+
+## 与同类的差异
+
+先交代这份对比的可信度，别把调研当成定论：
+
+- **已亲自抓官方文档核实**：Mister Download Manager（MDM）的工具清单、协议支持、校验和算法、自动化 API 的默认状态。
+- **代理转述、未逐条复核**：aria2 / qBittorrent / Transmission / yt-dlp 的 MCP 包装现状、MCP 长任务的阻塞与较新的 Tasks 扩展、以及「无预检把系统盘写满」的 issue。
+- 「抽样范围内没找到第二家」只代表这次调研没找到，**不等于业界没有**。
+
+最对口的同类是 **MDM**：自带 MCP server，7 个工具（`list` / `add` / `pause` / `resume` / `remove` / `start_queue` / `stop_queue`），支持 http/https/ftp/ftps，支持 5 种校验和（MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32），但**自动化 API 默认关闭、需手动开启**（以上经官方文档核实）。
+
+我们的差异：
+
+1. **8 个工具闭环**。相比 MDM 的 7 个，多出 `probe`（不建任务先看文件名与大小）、`wait`（同步等到结束）、`stats`（按状态汇总队列）、`doctor`（只读体检）。MDM 的 `start_queue` / `stop_queue` 我们没有对应的整体队列开关。
+2. **协议覆盖更宽**：除 http/https/ftp 外还支持 `magnet`、`ed2k`、`.torrent` URL、HLS、DASH 清单；MDM 是 http/https/ftp/ftps。
+3. **默认落点绑会话工作目录**。不传 `dir` 时落到 `<会话工作目录>/downloads`，目的就是「智能体下完还能读回」——**本次抽样范围内没有看到第二家这么做**。
+4. **预检只报告、不自动跳过**。`precheck` 给 blocked / skip / warn 的建议，决策权留给智能体。调研转述提到有项目因缺少预检把系统盘写满；我们选择报告而不代替决策，但这并不保证空间一定够。
+5. **同步 / 异步双模式**。默认立刻返回任务 id 并在后台监视、结束时主动通知；需要当场拿文件时用 `waitSeconds` 或 `ghost_wait` 同步等。调研转述称 MCP 的 tool 默认同步阻塞、长任务要靠 Tasks 扩展轮询与取消——若该转述成立，这一点上我们的调用方负担更轻。
+6. **校验和已补上，与 MDM 基本持平**：`checksum` 支持 md5 / sha1 / sha256 / sha512 共 **4 种**，MDM 是 5 种（多一个 CRC32）。**这项我们少一种，如实记录。**
+
+也必须诚实写出我们比 MDM 松的地方：
+
+- **MDM 的 magnet 会弹出「Add torrent」强制人工选文件**；本插件的智能体可以全自动提交 magnet 并用 `select` 自选文件。**我们的自动化程度更高，安全边界更松**。需要人工把关时，用 `controlRemoveEnabled`、`allowedUrlSchemes` 收紧，或在流程层要求人工确认。
 
 ## 诊断
 

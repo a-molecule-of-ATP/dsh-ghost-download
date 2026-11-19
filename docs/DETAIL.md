@@ -19,7 +19,7 @@ Prerequisite: install the `ghd` tool from Ghost Downloader's "Settings → Comma
 | `ghost_tasks` | List currently visible tasks with status and progress | `status` (filter), `limit` (cap) |
 | `ghost_task` | Inspect one task in detail, with failure attribution | `taskId` (required) |
 | `ghost_control` | Pause, resume, retry or remove tasks | `action` (pause/start/retry/remove), `taskIds`, `deleteFiles` (delete produced files on remove) |
-| `ghost_wait` | Wait synchronously for tasks and report their final state | `taskIds` (required), `timeoutSeconds` (default 600 s) |
+| `ghost_wait` | Wait synchronously for tasks and report their final state, optionally verifying integrity | `taskIds` (required), `timeoutSeconds` (default 600 s), `checksum` (verify a digest; exactly one taskId) |
 | `ghost_stats` | Aggregate counts and total bytes of visible tasks by status | `range` (7d/30d/all, default 7d) |
 | `ghost_doctor` | Read-only health check of ghd, network, folders and config | none |
 
@@ -74,6 +74,18 @@ Retry every failed task (`retry` with no `taskIds` means all failed tasks):
 {"action": "retry"}
 ```
 
+Verify integrity once the download completes (`checksum` requires **exactly one `taskId`**; passing several is a hard error):
+
+```json
+{"taskIds": ["tsk_0123"], "timeoutSeconds": 300, "checksum": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}
+```
+
+`checksum` also accepts a bare hex digest, with the algorithm inferred from its length (32=md5, 40=sha1, 64=sha256, 128=sha512). `ghd` has no checksum support of its own, so the plugin streams the digest itself after the file has landed — a large download is never held in memory. Three outcomes:
+
+- match → the result carries a "verified" line (rendered in Chinese, `校验通过：<algorithm> <digest>`), and `checksum.verified` is `true`;
+- mismatch → `ok:false` with `error.code = "checksumMismatch"` and both the expected and the actual value;
+- the landed file cannot be located → `error.code = "checksumNotVerified"`.
+
 ## Background watching and notification
 
 ![What happens after a submission](timing.svg)
@@ -86,6 +98,29 @@ By default a submission returns immediately with the task ids, and the plugin ke
 - `allowedUrlSchemes` is a protocol allow-list, defaulting to http, https, ftp, magnet, ed2k; links outside the list are rejected outright.
 - `ghost_control`'s `remove` deletes the task; with `deleteFiles: true` it also deletes the files that task already produced — a destructive operation. The `controlRemoveEnabled` setting can disable remove from the plugin page.
 - `headers` end up in `ghd`'s command-line arguments and are visible in the local process list; do not put sensitive credentials there.
+
+## How this differs from similar tools
+
+First, how much this comparison can be trusted:
+
+- **Verified by reading the vendor's own documentation**: Mister Download Manager's (MDM) tool list, protocol support, checksum algorithms, and the default state of its automation API.
+- **Second-hand, not re-checked line by line**: the current state of MCP wrappers for aria2 / qBittorrent / Transmission / yt-dlp, MCP's blocking behaviour for long tasks and the newer Tasks extension, and the issue where a missing precheck filled a system drive.
+- "Nothing else found in this sample" means only that — **it does not mean nobody else does it**.
+
+The closest counterpart is **MDM**: it ships an MCP server with 7 tools (`list` / `add` / `pause` / `resume` / `remove` / `start_queue` / `stop_queue`), supports http/https/ftp/ftps, offers 5 checksum algorithms (MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32), and its **automation API is off by default and must be enabled manually** (all verified against the vendor documentation).
+
+Where this plugin differs:
+
+1. **A closed loop of 8 tools.** Against MDM's 7 we add `probe` (inspect name and size without creating a task), `wait` (block until finished), `stats` (summarise the queue by status) and `doctor` (read-only health check). MDM's `start_queue` / `stop_queue` have no counterpart here — we do not expose a whole-queue switch.
+2. **Broader protocol coverage**: besides http/https/ftp we accept `magnet`, `ed2k`, `.torrent` URLs, HLS and DASH manifests; MDM covers http/https/ftp/ftps.
+3. **The default landing folder is tied to the session working directory.** With no `dir`, files land in `<session working directory>/downloads` precisely so the agent can read them back afterwards — **nothing else in this sample was found doing that**.
+4. **Precheck reports, it never skips.** `precheck` returns blocked / skip / warn as advice and leaves the decision to the agent. The survey mentions a project that filled a system drive for lack of a precheck; we choose to report rather than decide, which still does not guarantee there is enough space.
+5. **Both synchronous and asynchronous modes.** By default the call returns task ids at once and the plugin watches in the background, notifying on completion; when the file is needed immediately, `waitSeconds` or `ghost_wait` blocks instead. The survey (second-hand) says MCP tools block by default and that long tasks rely on the newer Tasks extension for polling and cancellation — if that holds, our dual mode asks less of the caller.
+6. **Checksums are now covered, roughly at parity with MDM**: `checksum` supports md5 / sha1 / sha256 / sha512 — **4 algorithms** against MDM's 5 (it also has CRC32). **We are one short here, stated plainly.**
+
+And where this plugin is honestly looser than MDM:
+
+- **MDM's magnet handling pops an "Add torrent" dialog that forces a human to choose files**; this plugin's agent can submit a magnet fully automatically and pick files itself via `select`. **That is more automation and a looser safety boundary.** When human sign-off is required, tighten `controlRemoveEnabled` and `allowedUrlSchemes`, or require confirmation in the workflow layer.
 
 ## Diagnostics
 

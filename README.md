@@ -13,7 +13,7 @@
 - `ghost_tasks`：列出 Ghost 当前所有任务及其状态与进度，可按 `status` 过滤，或用 `limit` 限制返回条数（最新优先，省略则全部）。
 - `ghost_task`：查看单个任务详情（状态、进度、文件、错误）。
 - `ghost_control`：控制任务——`pause` 暂停、`start` 继续/启动、`retry` 重试（`ghd start` 的封装：可指定 `taskIds`，省略则重试所有 `failed` 任务）、`remove` 删除（`remove` 会删除该任务尚未完成的文件，可用设置关掉；`deleteFiles:true` 还会删除已产出的文件）。
-- `ghost_wait`：阻塞等待给定任务停止运行（完成 / 失败 / 暂停 / 删除）后汇报最终状态；`timeoutSeconds` 默认为 **600 秒**、受 `waitLimitSeconds` 上限钳制。
+- `ghost_wait`：阻塞等待给定任务停止运行（完成 / 失败 / 暂停 / 删除）后汇报最终状态；`timeoutSeconds` 默认为 **600 秒**、受 `waitLimitSeconds` 上限钳制。可选 `checksum` 参数做完整性校验——传 `"<算法>:<十六进制>"`（`md5` / `sha1` / `sha256` / `sha512`）或裸十六进制摘要（按长度识别：32=md5、40=sha1、64=sha256、128=sha512），**要求只传一个 `taskId`**。`ghd` 本身没有任何校验和功能，所以插件在文件落盘后自行流式哈希（不把大文件读进内存）；匹配则结果带「校验通过」，不匹配则 `ok:false` 且 `error.code = "checksumMismatch"` 并列出期望值与实际值，定位不到文件则为 `checksumNotVerified`。
 - `ghost_stats`：聚合当前队列里可见任务的状态计数与总字节大小；Ghost 不保留下载历史，因此它只能汇总当前队列（`range` 参数仅作兼容收下，无法按时间过滤）。
 - `ghost_doctor`：只读健康检查——`ghd` 可用性、实时 `ghd tasks`、对已知小文件的网络/证书探测、会话下载目录可写性，以及与 Ghost 自身 `UserConfig.json` 的交叉核对（下载目录与代理）；返回一组成员级 `{name, ok, detail, hint}`，无副作用。
 
@@ -76,6 +76,29 @@
 - 工具超时是注册时按 schema 最大值推导的固定预算，调高 `waitLimitSeconds` 不会突破宿主截止时间；等待超时后未完成的任务转入后台监视并通知会话。`ghost_wait` 的 `timeoutSeconds` 默认 600 秒。
 - `ghost_stats` 只能统计当前队列：Ghost 不保留下载历史，`range` 参数收下但无法真正按时间过滤。
 
+## 与同类的差异
+
+先说清这份对比的可信度，避免把调研当成定论：
+
+- **已亲自抓官方文档核实**：Mister Download Manager 的工具清单、协议支持、校验和算法、自动化 API 的默认状态。
+- **代理转述、未逐条复核**：aria2 / qBittorrent / Transmission / yt-dlp 的 MCP 包装现状、MCP 长任务的阻塞与 Tasks 扩展、以及「无预检把系统盘撑爆」的 issue。
+- 「抽样范围内没找到第二家」只代表这次调研没找到，**不等于业界没有**。
+
+最对口的同类是 **Mister Download Manager（MDM）**：它自带 MCP server，提供 7 个工具（`list` / `add` / `pause` / `resume` / `remove` / `start_queue` / `stop_queue`），支持 http/https/ftp/ftps，支持 5 种校验和（MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32），但**自动化 API 默认关闭、需手动开启**（以上均经官方文档核实）。
+
+我们的差异：
+
+1. **8 个工具闭环**。相比 MDM 的 7 个，我们多出 `probe`（不建任务先看文件名与大小）、`wait`（同步等到结束）、`stats`（按状态汇总队列）与 `doctor`（只读体检）。MDM 的 `start_queue` / `stop_queue` 我们没有对应的整体队列开关。
+2. **协议覆盖更宽**。除 http/https/ftp 外还支持 `magnet`、`ed2k`、`.torrent` URL、HLS、DASH 清单；MDM 的协议面是 http/https/ftp/ftps。
+3. **默认落点绑会话工作目录**。不传 `dir` 时文件落到 `<会话工作目录>/downloads`，目的就是「智能体下完还能读回」——这一步是我们设计时的核心取舍，**在本次抽样范围内没有看到第二家这么做**。MDM 按它自己的下载目录归档。
+4. **预检只报告、不自动跳过**。`precheck` 用 `ghd probe` 给出 blocked / skip / warn 的建议，决策权留给智能体；调研中提到有项目因缺少预检把系统盘写满，我们选择"报告而不代替决策"，但仍不能保证空间一定够。
+5. **同步 / 异步双模式**。默认提交后立刻返回任务 id 并在后台监视、结束时主动通知；需要当场拿文件时可以 `waitSeconds` 同步等，或用 `ghost_wait`。调研转述称 MCP 的 tool 默认同步阻塞、长任务要靠较新的 Tasks 扩展做轮询和取消；若该转述成立，这一点上我们的双模式更省调用方的心智。
+6. **校验和现在补上了，与 MDM 基本持平**。`ghost_wait` 的 `checksum` 支持 md5 / sha1 / sha256 / sha512 共 **4 种**；MDM 是 5 种（多一个 CRC32）。**这一项我们少一种，如实记录**。
+
+也必须诚实写出我们比 MDM 松的地方：
+
+- **MDM 的 magnet 会弹出「Add torrent」强制人工选文件**；本插件的智能体可以全自动提交 magnet 并自行选择文件（`select` 参数）。也就是说，**我们的自动化程度更高，安全边界更松**——需要人工把关时，请用 `controlRemoveEnabled`、`allowedUrlSchemes` 收紧，或在流程层要求人工确认。
+
 ## 安全说明（哪些操作有破坏性）
 
 - **`ghost_control` 的 `remove` 会删除任务尚未完成的文件**——这是本插件最具破坏性的操作，可用 `controlRemoveEnabled:false` 彻底移除该动作；`deleteFiles:true` 还会删除它已经产出的文件。
@@ -91,4 +114,4 @@ MIT © 2026 dafeiyu。详见 [LICENSE](LICENSE)。
 
 ---
 
-**English summary:** A DeepSeek Harness plugin that drives Ghost Downloader through its official `ghd` CLI. It registers eight model tools — `ghost_download`, `ghost_probe`, `ghost_tasks`, `ghost_task`, `ghost_control`, `ghost_wait`, `ghost_stats`, and `ghost_doctor` — and adds a live download-queue sidebar plus a guard that redirects shell downloads. `ghost_control` gains a `retry` action; new per-call arguments include `useGhostFolder`, `precheck`, `conflict` (default keep), and `waitSeconds`; omitting the `dir` argument saves under `<session>/downloads`. Twelve volatile settings cover the executable path, protocol allow-list, wait/output limits, and safety settings. It vendors Schemastery/Cosmokit for link installs and is licensed MIT.
+**English summary:** A DeepSeek Harness plugin that drives Ghost Downloader through its official `ghd` CLI. It registers eight model tools — `ghost_download`, `ghost_probe`, `ghost_tasks`, `ghost_task`, `ghost_control`, `ghost_wait`, `ghost_stats`, and `ghost_doctor` — and adds a live download-queue sidebar plus a guard that redirects shell downloads. `ghost_control` gains a `retry` action; new per-call arguments include `useGhostFolder`, `precheck`, `conflict` (default keep), `waitSeconds`, and `checksum` on `ghost_wait` (md5 / sha1 / sha256 / sha512, verified by the plugin itself since `ghd` has no checksum support); omitting the `dir` argument saves under `<session>/downloads`. Twelve volatile settings cover the executable path, protocol allow-list, wait/output limits, and safety settings. See "How this differs from comparable projects" above for a sourced comparison against Mister Download Manager, including where this plugin is deliberately looser. It vendors Schemastery/Cosmokit for link installs and is licensed MIT.
