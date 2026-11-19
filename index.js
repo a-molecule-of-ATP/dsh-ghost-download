@@ -1146,14 +1146,17 @@ function protocolOf(url) {
    */
   const SUBMISSION_CAP = 100;
   const submissions = [];
-  const recordSubmission = (agent, items) => {
+  const recordSubmission = (exec, items) => {
+    const agent = exec?.agent;
     const session = agent?.session;
     const sessionId = typeof session?.id === 'string' ? session.id : '';
+    const callId = typeof exec?.callId === 'string' ? exec.callId : '';
     if (sessionId === '' || items.length === 0) return;
     const log = session?.log;
     const seq = Array.isArray(log) && log.length > 0 ? log[log.length - 1]?.seq : undefined;
     submissions.push({
       sessionId,
+      ...(callId === '' ? {} : { callId }),
       ...(Number.isFinite(seq) ? { seq } : {}),
       at: Date.now(),
       items,
@@ -1275,18 +1278,23 @@ function protocolOf(url) {
       path: '/plugin/ghost-download/submissions',
       resource: async (request) => {
         const url = new URL(request?.url ?? 'http://localhost/');
+        const callId = url.searchParams.get('call') ?? '';
         const sessionId = url.searchParams.get('session') ?? '';
         const from = Number(url.searchParams.get('from'));
         const to = Number(url.searchParams.get('to'));
-        const entries = sessionId === ''
-          ? []
-          : submissions.filter((entry) => {
-            if (entry.sessionId !== sessionId) return false;
-            if (!Number.isFinite(entry.seq)) return false;
-            if (Number.isFinite(from) && entry.seq < from) return false;
-            if (Number.isFinite(to) && entry.seq > to) return false;
-            return true;
-          });
+        const entries = callId !== ''
+          // Exact: the tool view knows its own callId, so no sequence matching is
+          // needed and two downloads in one turn cannot be confused.
+          ? submissions.filter((entry) => entry.callId === callId)
+          : sessionId === ''
+            ? []
+            : submissions.filter((entry) => {
+              if (entry.sessionId !== sessionId) return false;
+              if (!Number.isFinite(entry.seq)) return false;
+              if (Number.isFinite(from) && entry.seq < from) return false;
+              if (Number.isFinite(to) && entry.seq > to) return false;
+              return true;
+            });
         return new Response(JSON.stringify({ entries }), {
           status: 200,
           headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
@@ -1538,7 +1546,7 @@ function protocolOf(url) {
       const taskIds = findTaskIds(accepted);
       // Remember what this turn submitted, so the client can put a card under it.
       // Done before any early return: a fire-and-forget batch needs the card most.
-      recordSubmission(exec.agent, accepted
+      recordSubmission(exec, accepted
         .filter((item) => item && typeof item === 'object' && typeof item.taskId === 'string')
         .map((item) => {
           const protocol = protocolOf(item.url);

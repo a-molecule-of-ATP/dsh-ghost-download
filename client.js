@@ -521,51 +521,77 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The card under the turn that actually submitted the download.
+     * The download card, rendered in place of the `ghost_download` tool row.
      *
-     * Placement uses the session event sequence: this plugin records the last event
-     * seq at submit time, and the turn component is given `turn.start.seq` /
-     * `turn.end.seq`. Nothing is guessed from timestamps.
+     * `tool.call.toolview` is keyed by wire tool name, so this is the sanctioned way
+     * to own one tool's card. Placement is therefore exact: the card IS the call.
+     * The submission is looked up by `callId`, which the host records at submit time
+     * and the view receives as a prop — no timestamp or sequence guessing.
      */
-    function TurnDownloadCard(props) {
-      const sessionId = props?.sessionId;
-      const from = props?.turn?.start?.seq;
-      const to = props?.turn?.end?.seq;
+    function GhostDownloadRow(props) {
+      const callId = props?.callId;
+      const phase = props?.phase;
+      const block = props?.block;
       const tasks = useSharedTasks();
-      const [entries, setEntries] = useState(null);
+      const [items, setItems] = useState(null);
 
       useEffect(() => {
-        if (typeof sessionId !== 'string' || sessionId === '') return undefined;
-        if (!Number.isFinite(from) || !Number.isFinite(to)) return undefined;
+        if (typeof callId !== 'string' || callId === '') return undefined;
         let alive = true;
-        const query = `session=${encodeURIComponent(sessionId)}&from=${from}&to=${to}`;
-        fetch(`/plugin/ghost-download/submissions?${query}`, { credentials: 'same-origin' })
+        fetch(`/plugin/ghost-download/submissions?call=${encodeURIComponent(callId)}`, { credentials: 'same-origin' })
           .then((response) => response.json())
           .then((data) => {
-            if (alive) setEntries(Array.isArray(data?.entries) ? data.entries : []);
+            if (!alive) return;
+            const entries = Array.isArray(data?.entries) ? data.entries : [];
+            setItems(entries.flatMap((entry) => (Array.isArray(entry.items) ? entry.items : [])));
           })
           .catch(() => {
-            if (alive) setEntries([]);
+            if (alive) setItems([]);
           });
         return () => { alive = false; };
-      }, [sessionId, from, to]);
+      }, [callId]);
 
-      if (entries === null || entries.length === 0) return null;
-      const items = entries.flatMap((entry) => (Array.isArray(entry.items) ? entry.items : []));
-      if (items.length === 0) return null;
+      // A call made before this plugin version has no recorded submission. Fall
+      // back to the arguments so the row still says what was asked for, instead of
+      // rendering an empty header where the generic row used to be.
+      const fromArgs = (() => {
+        if (items !== null && items.length > 0) return null;
+        const raw = settled ? block?.call?.argsRaw : block?.argsRaw;
+        if (typeof raw !== 'string' || raw === '') return null;
+        try {
+          const parsed = JSON.parse(raw);
+          const urls = Array.isArray(parsed?.urls) ? parsed.urls.filter((u) => typeof u === 'string') : [];
+          if (urls.length === 0) return null;
+          return urls.map((url) => {
+            const scheme = (/^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1] ?? '').toLowerCase();
+            const path = url.split('?')[0].split('#')[0].toLowerCase();
+            const kind = path.endsWith('.m3u8') ? 'HLS' : path.endsWith('.mpd') ? 'DASH' : undefined;
+            return { taskId: undefined, url, name: '', scheme, ...(kind ? { kind } : {}) };
+          });
+        } catch {
+          return null;
+        }
+      })();
+
+      const failed = phase === 'result' && block?.isError === true;
+      const settled = phase === 'result';
+      const rows = items !== null && items.length > 0 ? items : (fromArgs ?? []);
+      const headline = failed
+        ? '⬇ 下载提交失败'
+        : rows.length === 0
+          ? (settled ? '⬇ 下载' : '⬇ 正在提交下载…')
+          : `⬇ 下载 · ${rows.length} 项`;
       const byId = new Map(tasks.map((task) => [task.id, task]));
-      const statuses = items.map((item) => String(byId.get(item.taskId)?.status ?? '').toLowerCase());
-      const finished = statuses.every((status) => status === 'completed');
-      const failed = statuses.filter((status) => status === 'failed').length;
-      const headline = finished
-        ? `✓ 下载完成 · ${items.length} 项`
-        : failed > 0
-          ? `下载中 · ${items.length} 项（${failed} 项失败）`
-          : `⬇ 下载中 · ${items.length} 项`;
       const cell = { padding: '5px 8px', borderTop: '1px solid var(--dsw-alias-border-l1)' };
+      const errorText = failed
+        ? (Array.isArray(block?.content)
+          ? block.content.filter((part) => part?.type === 'text').map((part) => part.text).join('\n')
+          : '')
+        : '';
       return h('div', {
+        'data-tool': 'ghost_download',
         style: {
-          marginTop: 8,
+          margin: '6px 0',
           border: '1px solid var(--dsw-alias-border-l1)',
           borderRadius: 10,
           overflow: 'hidden',
@@ -578,18 +604,32 @@ window.__ModuleLoader__.load({
           key: 'h',
           style: { padding: '7px 10px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
         }, headline),
-        h('table', { key: 't', style: { width: '100%', borderCollapse: 'collapse' } }, [
-          h('tbody', { key: 'b' }, items.slice(0, 5).map((item, index) => h('tr', { key: item.taskId ?? index }, [
-            h('td', { key: 'n', style: { ...cell, color: 'var(--dsw-alias-label-primary)', wordBreak: 'break-all' } },
-              item.name || '（等待 Ghost 命名）'),
-            h('td', { key: 'u', style: { ...cell, wordBreak: 'break-all' } }, item.url || ''),
-            h('td', { key: 'p', style: { ...cell, whiteSpace: 'nowrap' } },
-              item.kind ? `${item.scheme} · ${item.kind}` : (item.scheme || '')),
-          ]))),
-        ]),
-        items.length > 5
+        errorText === ''
+          ? null
+          : h('div', {
+            key: 'e',
+            style: { padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' },
+          }, errorText),
+        rows.length === 0
+          ? null
+          : h('table', { key: 't', style: { width: '100%', borderCollapse: 'collapse' } }, [
+            h('tbody', { key: 'b' }, rows.slice(0, 5).map((item, index) => {
+              const live = byId.get(item.taskId);
+              const status = String(live?.status ?? '').toLowerCase();
+              const progress = Number.isFinite(live?.progress) ? ` ${live.progress}%` : '';
+              return h('tr', { key: item.taskId ?? index }, [
+                h('td', { key: 'n', style: { ...cell, color: 'var(--dsw-alias-label-primary)', wordBreak: 'break-all' } },
+                  item.name || '（等待 Ghost 命名）'),
+                h('td', { key: 'u', style: { ...cell, wordBreak: 'break-all' } }, item.url || ''),
+                h('td', { key: 'p', style: { ...cell, whiteSpace: 'nowrap' } },
+                  item.kind ? `${item.scheme} · ${item.kind}` : (item.scheme || '')),
+                h('td', { key: 's', style: { ...cell, whiteSpace: 'nowrap' } }, `${status}${progress}`),
+              ]);
+            })),
+          ]),
+        rows.length > 5
           ? h('div', { key: 'm', style: { padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)' } },
-            `还有 ${items.length - 5} 项`)
+            `还有 ${rows.length - 5} 项`)
           : null,
       ]);
     }
@@ -1167,13 +1207,14 @@ window.__ModuleLoader__.load({
             console.warn('[ghost-download] composer strip registration failed:', error);
           }
           try {
-            ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
-              name: 'conversation.chat.turnTail',
-              id: 'ghost-download-turn',
-              order: 20,
-            }, TurnDownloadCard));
+            // Keyed by the wire tool name: this card IS the ghost_download call, so
+            // it sits exactly where the call happened instead of at the turn's end.
+            ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+              name: 'tool.call.toolview',
+              key: 'ghost_download',
+            }, GhostDownloadRow));
           } catch (error) {
-            console.warn('[ghost-download] turn card registration failed:', error);
+            console.warn('[ghost-download] tool view registration failed:', error);
           }
         }
 
