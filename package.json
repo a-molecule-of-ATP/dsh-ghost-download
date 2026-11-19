@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-ghost-download",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek Harness plugin that drives Ghost Downloader via its official ghd CLI: add, probe, list, inspect, pause, resume, remove, and wait for downloads.",
