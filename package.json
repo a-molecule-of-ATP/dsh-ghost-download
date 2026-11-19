@@ -13,15 +13,15 @@
     "download"
   ],
   "license": "MIT",
-  "author": "dafeiyu",
+  "author": "a-molecule-of-ATP",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dafeiyu/dsh-ghost-download.git"
+    "url": "https://github.com/a-molecule-of-ATP/dsh-ghost-download.git"
   },
   "bugs": {
-    "url": "https://github.com/dafeiyu/dsh-ghost-download/issues"
+    "url": "https://github.com/a-molecule-of-ATP/dsh-ghost-download/issues"
   },
-  "homepage": "https://github.com/dafeiyu/dsh-ghost-download#readme",
+  "homepage": "https://github.com/a-molecule-of-ATP/dsh-ghost-download#readme",
   "icon": "./icon.svg",
   "exports": {
     ".": "./index.js",

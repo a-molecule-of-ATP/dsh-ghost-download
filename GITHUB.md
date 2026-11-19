@@ -11,8 +11,8 @@
 
 ## 发布前要改的占位符
 
-- `package.json` 的 `repository.url` / `bugs.url` / `homepage` 目前指向 `https://github.com/dafeiyu/dsh-ghost-download.git`，确认 GitHub 用户名 `dafeiyu` 与仓库名无误；若实际账号不同，全局替换 `dafeiyu/dsh-ghost-download`。
-- `LICENSE` 的版权行为 `Copyright (c) 2026 dafeiyu`，确认年份与署名。
+- `package.json` 的 `repository.url` / `bugs.url` / `homepage` 目前指向 `https://github.com/a-molecule-of-ATP/dsh-ghost-download.git`，确认 GitHub 用户名 `a-molecule-of-ATP` 与仓库名无误；若实际账号不同，全局替换 `a-molecule-of-ATP/dsh-ghost-download`。
+- `LICENSE` 的版权行为 `Copyright (c) 2026 a-molecule-of-ATP`，确认年份与署名。
 - `README.md` 安装段落里的 `name: '@local/dsh-ghost-download'` 与 `package.json` 的 `name` 必须一致（当前一致）。
 - **确认 vendored 依赖会随仓库提交**：`VENDORED.md` 说明 `node_modules/@deepseek-ai/{schemastery,cosmokit}` 是运行必需，`.gitignore` 只忽略 `node_modules/.cache`，不会忽略这两个目录。`package.json` 的 `files` 数组未显式列出 `node_modules`（link 安装按整个目录工作），但 GitHub 仓库本身必须带上这两个目录，否则 clone 后无法使用。
 
@@ -21,7 +21,7 @@
 ```bash
 cd dsh-ghost-download
 git add -A && git commit -m "chore: prepare dsh-ghost-download for GitHub release"
-git remote add origin https://github.com/dafeiyu/dsh-ghost-download.git
+git remote add origin https://github.com/a-molecule-of-ATP/dsh-ghost-download.git
 git push -u origin main
 ```
 
