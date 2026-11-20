@@ -80,7 +80,7 @@ Verify integrity once the download completes (`checksum` requires **exactly one 
 {"taskIds": ["tsk_0123"], "timeoutSeconds": 300, "checksum": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}
 ```
 
-`checksum` also accepts a bare hex digest, with the algorithm inferred from its length (32=md5, 40=sha1, 64=sha256, 128=sha512). `ghd` has no checksum support of its own, so the plugin streams the digest itself after the file has landed — a large download is never held in memory. Three outcomes:
+`checksum` also accepts a bare hex digest, with the algorithm inferred from its length (8=crc32, 32=md5, 40=sha1, 64=sha256, 128=sha512). `ghd` has no checksum support of its own, so the plugin streams the digest itself after the file has landed — a large download is never held in memory. Three outcomes:
 
 - match → the result carries a "verified" line (rendered in Chinese, `校验通过：<algorithm> <digest>`), and `checksum.verified` is `true`;
 - mismatch → `ok:false` with `error.code = "checksumMismatch"` and both the expected and the actual value;
@@ -126,10 +126,10 @@ Against MDM specifically (the closest on features):
 3. **Default landing folder bound to the session workspace**: without `dir` the file lands in `<session cwd>/downloads`, so the agent can read it back afterwards. This was not found elsewhere in the sample.
 4. **Precheck reports, never skips**: `precheck` returns blocked / skip / warn advice and leaves the decision to the caller.
 5. **Both sync and async**: a submission returns task ids immediately and is watched in the background; `waitSeconds` or `ghost_wait` block when the file is needed right away.
-6. **Four checksums, one fewer than MDM**: md5 / sha1 / sha256 / sha512; MDM adds CRC32. Recorded here as a shortfall.
+6. **Five checksums, level with MDM**: md5 / sha1 / sha256 / sha512 plus CRC32 — `node:crypto` does not provide it, so the plugin computes it with the IEEE 802.3 table that zip itself uses.
 
 ## Diagnostics
 
-When downloads fail or tasks keep erroring, run `ghost_doctor` first: it checks `ghd --version`, `ghd tasks`, a network/certificate probe against a known small file, writability of the download folder, and Ghost's own `UserConfig.json` download folder and proxy settings. It never touches the download queue, but it is not side-effect free: it writes and immediately deletes a temporary probe file and makes one network request. `ghost_task` gives a hedged "possible cause" attribution for failures (certificate, DNS, auth, gone, range request, etc.).
+When downloads fail or tasks keep erroring, run `ghost_doctor` first: it checks `ghd --version`, `ghd tasks`, a network/certificate probe against a known small file, writability of the download folder, and Ghost's own `UserConfig.json` download folder and proxy settings. It never touches the download queue, but it is not side-effect free: it writes and immediately deletes a temporary probe file and makes one network request. `ghost_task` gives a hedged "possible cause" attribution for failures (certificate, DNS, auth, gone, range request, etc.) plus a suggested next action — something concrete to run, such as re-probing the link or resubmitting with headers.
 
 `ghost_stats` only aggregates **currently visible** tasks: Ghost keeps no download history, so its `range` parameter (7d/30d/all) is a placeholder for API consistency and cannot actually filter by time — no ledger is invented.

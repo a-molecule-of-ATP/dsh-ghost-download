@@ -64,5 +64,23 @@ if (existsSync(docs)) {
   pass('doc images resolve');
 }
 
+// 5. every checksum algorithm must be documented in all three prose files.
+//    Adding one to the implementation but not the docs is what left `crc32`
+//    missing from two of them while the third said "5 of 5".
+const checksumMatch = /const CHECKSUM_ALGORITHMS = \{([\s\S]*?)\};/.exec(source);
+if (checksumMatch === null) {
+  fail('cannot find CHECKSUM_ALGORITHMS in index.js');
+} else {
+  const algorithms = [...checksumMatch[1].matchAll(/([a-z0-9]+):\s*'/g)].map((m) => m[1]);
+  const prose = ['README.md', 'docs/DETAIL.zh.md', 'docs/DETAIL.md']
+    .map((name) => ({ name, text: readFileSync(path.join(root, name), 'utf8') }));
+  const gaps = [];
+  for (const algorithm of algorithms) {
+    for (const file of prose) if (!file.text.includes(algorithm)) gaps.push(`${algorithm} in ${file.name}`);
+  }
+  if (gaps.length > 0) fail(`checksum algorithms missing from prose: ${gaps.join(', ')}`);
+  else pass(`${algorithms.length} checksum algorithms documented`);
+}
+
 console.log(problems === 0 ? '\nSELF-CHECK OK' : `\n${problems} PROBLEM(S)`);
 process.exitCode = problems === 0 ? 0 : 1;

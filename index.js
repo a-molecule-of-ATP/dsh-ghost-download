@@ -465,7 +465,7 @@ function readGhostUserConfig() {
  * Turn a ghd error string into an attribution the model can act on.
  *
  * Deliberately hedged ("可能原因"): the matcher sees text, not ground truth, so
- * it must never assert the cause. Returns `{ category, hint, retryable }`.
+ * it must never assert the cause. Returns `{ category, hint, retryable, nextAction }`.
  */
 function failureAttribution(error) {
   // ghd reports the failure in `error`, `lastError`, or sometimes a nested
@@ -486,27 +486,35 @@ function failureAttribution(error) {
   let category = 'unknown';
   let hint = '可能原因不明；请查看原始 error 输出，或稍后重试。';
   let retryable = true;
+  // A concrete next step, not a diagnosis: the point of attribution is that the
+  // model has something to do afterwards instead of re-reading the same error.
+  let nextAction = '先 ghost_task 看完整 error，再用 ghost_control(action:"retry") 重试一次。';
 
   if (match(/ssl|certificate|certificate_verify_failed|cert_verify|tls|握手/i)) {
     category = 'certificate';
     hint = '可能原因：目标站点的 SSL/TLS 证书校验失败（代理、自签名证书或系统时间异常都可能引起）。'
       + '请检查系统时间与代理证书设置；若确认可信，可在 Ghost 设置中调整证书校验。';
+    nextAction = '先确认系统时间与代理设置；确认站点可信后，在 Ghost 设置里关闭证书校验再 ghost_control(action:"retry")。';
   } else if (match(/dns|11001|host not found|name resolution|getaddrinfo|enotfound/i)) {
     category = 'network.dns';
     hint = '可能原因：域名解析失败（DNS 不可达、域名不存在或网络断开）。请检查网络连接与 DNS 设置后重试。';
+    nextAction = '先 ghost_doctor 看网络探测结果；网络恢复后 ghost_control(action:"retry")。';
   } else if (match(/\b403\b|\b401\b|unauthorized|forbidden|access denied/i)) {
     category = 'auth';
     hint = '可能原因：服务器拒绝了未授权的请求（403/401）。可尝试在 headers 里补上 Referer / Cookie 等鉴权信息后重试。';
+    nextAction = '用 ghost_download 重新提交同一个链接，并在 headers 里带上 Referer / Cookie 等鉴权信息。';
   } else if (match(/\b404\b|not found|gone/i)) {
     category = 'gone';
     hint = '可能原因：资源不存在或已被移除（404）。该链接可能已失效，通常不建议重试。';
     retryable = false;
+    nextAction = '先用 ghost_probe 复核该链接；仍然 404 就换源，不要重复重试。';
   } else if (match(/范围请求|range request|range not satisfiable|416|range|断点续传/i)) {
     category = 'noRange';
     hint = '可能原因：服务器拒绝了范围请求，无法断点续传。可尝试删除残缺文件后从头下载。';
+    nextAction = 'ghost_control(action:"remove", taskIds:[…]) 清掉残缺任务，再 ghost_download 重新提交。';
   }
 
-  return { category, hint, retryable };
+  return { category, hint, retryable, nextAction };
 }
 
 /**
@@ -795,9 +803,14 @@ export function apply(ctx, config) {
  * Hash algorithms we can verify locally. `ghd` has no checksum support, so the
  * plugin computes the digest itself once the file has landed.
  */
-const CHECKSUM_ALGORITHMS = { md5: 'md5', sha1: 'sha1', sha256: 'sha256', sha512: 'sha512' };
+const CHECKSUM_ALGORITHMS = {
+  md5: 'md5', sha1: 'sha1', sha256: 'sha256', sha512: 'sha512',
+  // CRC32 is not a node:crypto digest, so it is computed here; Mister Download
+  // Manager supports it and it is the one algorithm we were missing.
+  crc32: 'crc32',
+};
 /** Digest length -> algorithm, for a bare hex string with no prefix. */
-const CHECKSUM_BY_LENGTH = { 32: 'md5', 40: 'sha1', 64: 'sha256', 128: 'sha512' };
+const CHECKSUM_BY_LENGTH = { 8: 'crc32', 32: 'md5', 40: 'sha1', 64: 'sha256', 128: 'sha512' };
 
 /**
  * Parse an expected checksum in the form `sha256:<hex>` (or a bare hex digest
@@ -812,7 +825,7 @@ function parseChecksum(raw) {
   if (prefixed) {
     const algorithm = CHECKSUM_ALGORITHMS[prefixed[1]];
     if (!algorithm) {
-      return { error: `unsupported checksum algorithm "${prefixed[1]}" (use md5, sha1, sha256 or sha512)` };
+      return { error: `unsupported checksum algorithm "${prefixed[1]}" (use md5, sha1, sha256, sha512 or crc32)` };
     }
     if (CHECKSUM_BY_LENGTH[prefixed[2].length] !== algorithm) {
       return { error: `"${algorithm}" digest has the wrong length (${prefixed[2].length} chars)` };
@@ -823,9 +836,36 @@ function parseChecksum(raw) {
     return { algorithm: CHECKSUM_BY_LENGTH[text.length], expected: text };
   }
   return {
-    error: 'use "<algorithm>:<hex>" such as sha256:abc… (md5 / sha1 / sha256 / sha512), '
+    error: 'use "<algorithm>:<hex>" such as sha256:abc… (md5 / sha1 / sha256 / sha512 / crc32), '
       + 'or a bare hex digest whose length identifies the algorithm',
   };
+}
+
+/** Standard CRC-32 (IEEE 802.3, the zip one) lookup table, built once. */
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let bit = 0; bit < 8; bit += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+/** Stream a file through CRC-32; the digest is 8 hex characters. */
+async function crc32File(filePath) {
+  let crc = 0xffffffff;
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => {
+      for (let i = 0; i < chunk.length; i += 1) {
+        crc = CRC32_TABLE[(crc ^ chunk[i]) & 0xff] ^ (crc >>> 8);
+      }
+    });
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0');
 }
 
 /**
@@ -1830,7 +1870,8 @@ function protocolOf(url) {
           blocks.push({
             type: 'text',
             text: bounded(
-              `失败归因（可能原因）：${a.category}；可重试：${a.retryable ? '是' : '否'}\n${a.hint}`,
+              `失败归因（可能原因）：${a.category}；可重试：${a.retryable ? '是' : '否'}\n${a.hint}`
+                + (a.nextAction ? `\n建议动作：${a.nextAction}` : ''),
               settings().maxErrorChars,
             ),
           });
@@ -1957,7 +1998,7 @@ function protocolOf(url) {
         checksum: {
           type: 'string',
           description: 'Verify the downloaded file after it completes: pass "<algorithm>:<hex>" '
-            + '(md5 / sha1 / sha256 / sha512) or a bare hex digest whose length identifies the algorithm. '
+            + '(md5 / sha1 / sha256 / sha512 / crc32) or a bare hex digest whose length identifies the algorithm. '
             + 'Requires exactly one taskId. ghost has no checksum support of its own, so the plugin hashes '
             + 'the landed file itself; a mismatch turns the call into a failure.',
         },
@@ -2024,7 +2065,9 @@ function protocolOf(url) {
         };
       }
       try {
-        const actual = await hashFile(landing, parsed.algorithm);
+        const actual = parsed.algorithm === 'crc32'
+          ? await crc32File(landing)
+          : await hashFile(landing, parsed.algorithm);
         const verified = actual === parsed.expected;
         const checksum = {
           algorithm: parsed.algorithm, expected: parsed.expected, actual,
