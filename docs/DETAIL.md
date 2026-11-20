@@ -101,26 +101,32 @@ By default a submission returns immediately with the task ids, and the plugin ke
 
 ## How this differs from similar tools
 
-First, how much this comparison can be trusted:
+Credibility first, so this is not taken as settled:
 
-- **Verified by reading the vendor's own documentation**: Mister Download Manager's (MDM) tool list, protocol support, checksum algorithms, and the default state of its automation API.
-- **Second-hand, not re-checked line by line**: the current state of MCP wrappers for aria2 / qBittorrent / Transmission / yt-dlp, MCP's blocking behaviour for long tasks and the newer Tasks extension, and the issue where a missing precheck filled a system drive.
-- "Nothing else found in this sample" means only that — **it does not mean nobody else does it**.
+- **Verified against official documentation**: Mister Download Manager's tool list, protocols and checksums; the existence and route of KGet, Motrix CLI and FluxDown.
+- **Relayed, not re-checked**: the MCP wrappers around aria2 / qBittorrent / yt-dlp, and the report of a machine filled up because nothing prechecked free space.
+- "Not found in the sample" means exactly that — **not that it does not exist**.
 
-The closest counterpart is **MDM**: it ships an MCP server with 7 tools (`list` / `add` / `pause` / `resume` / `remove` / `start_queue` / `stop_queue`), supports http/https/ftp/ftps, offers 5 checksum algorithms (MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32), and its **automation API is off by default and must be enabled manually** (all verified against the vendor documentation).
+Download tooling divides by **whose queue it is**:
 
-Where this plugin differs:
+| Project | Queue owner | Difference |
+|---|---|---|
+| Mister Download Manager | its own (7 tools, 5 checksums) | the user has to switch to it |
+| KGet / Motrix CLI | their own desktop apps | same: the agent is a client |
+| FluxDown | its own engine + built-in MCP | protocol coverage matches ours (eD2K / HLS / DASH included) |
+| aria2-mcp family | a separate aria2 instance | the agent's queue and the human's are unrelated |
+| **This plugin** | **the Ghost Downloader already installed** | **no new engine, no queue migration** |
 
-1. **A closed loop of 8 tools.** Against MDM's 7 we add `probe` (inspect name and size without creating a task), `wait` (block until finished), `stats` (summarise the queue by status) and `doctor` (read-only health check). MDM's `start_queue` / `stop_queue` have no counterpart here — we do not expose a whole-queue switch.
-2. **Broader protocol coverage**: besides http/https/ftp we accept `magnet`, `ed2k`, `.torrent` URLs, HLS and DASH manifests; MDM covers http/https/ftp/ftps.
-3. **The default landing folder is tied to the session working directory.** With no `dir`, files land in `<session working directory>/downloads` precisely so the agent can read them back afterwards — **nothing else in this sample was found doing that**.
-4. **Precheck reports, it never skips.** `precheck` returns blocked / skip / warn as advice and leaves the decision to the agent. The survey mentions a project that filled a system drive for lack of a precheck; we choose to report rather than decide, which still does not guarantee there is enough space.
-5. **Both synchronous and asynchronous modes.** By default the call returns task ids at once and the plugin watches in the background, notifying on completion; when the file is needed immediately, `waitSeconds` or `ghost_wait` blocks instead. The survey (second-hand) says MCP tools block by default and that long tasks rely on the newer Tasks extension for polling and cancellation — if that holds, our dual mode asks less of the caller.
-6. **Checksums are now covered, roughly at parity with MDM**: `checksum` supports md5 / sha1 / sha256 / sha512 — **4 algorithms** against MDM's 5 (it also has CRC32). **We are one short here, stated plainly.**
+So the most concrete difference is not "more features" but that **this plugin is an adapter, not a downloader**: the desktop keeps working exactly as before, with one extra entry point an agent can press; downloads started by the agent and by the user share one queue, visible and controllable in the app.
 
-And where this plugin is honestly looser than MDM:
+Against MDM specifically (the closest on features):
 
-- **MDM's magnet handling pops an "Add torrent" dialog that forces a human to choose files**; this plugin's agent can submit a magnet fully automatically and pick files itself via `select`. **That is more automation and a looser safety boundary.** When human sign-off is required, tighten `controlRemoveEnabled` and `allowedUrlSchemes`, or require confirmation in the workflow layer.
+1. **Eight tools.** Beyond MDM's seven we add `probe` (name and size without creating a task), `wait` (block until done), `stats` (queue summary) and `doctor` (read-only health check); MDM's `start_queue` / `stop_queue` have no counterpart here.
+2. **Wider protocols than MDM**: `magnet`, `ed2k`, `.torrent` URLs, HLS and DASH in addition to http/https/ftp. But multi-protocol downloaders such as FluxDown cover the same ground, **so protocol coverage is not a unique advantage here**.
+3. **Default landing folder bound to the session workspace**: without `dir` the file lands in `<session cwd>/downloads`, so the agent can read it back afterwards. This was not found elsewhere in the sample.
+4. **Precheck reports, never skips**: `precheck` returns blocked / skip / warn advice and leaves the decision to the caller.
+5. **Both sync and async**: a submission returns task ids immediately and is watched in the background; `waitSeconds` or `ghost_wait` block when the file is needed right away.
+6. **Four checksums, one fewer than MDM**: md5 / sha1 / sha256 / sha512; MDM adds CRC32. Recorded here as a shortfall.
 
 ## Diagnostics
 

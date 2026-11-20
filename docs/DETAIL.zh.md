@@ -98,26 +98,32 @@
 
 ## 与同类的差异
 
-先交代这份对比的可信度，别把调研当成定论：
+先说可信度，避免把调研当成定论：
 
-- **已亲自抓官方文档核实**：Mister Download Manager（MDM）的工具清单、协议支持、校验和算法、自动化 API 的默认状态。
-- **代理转述、未逐条复核**：aria2 / qBittorrent / Transmission / yt-dlp 的 MCP 包装现状、MCP 长任务的阻塞与较新的 Tasks 扩展、以及「无预检把系统盘写满」的 issue。
-- 「抽样范围内没找到第二家」只代表这次调研没找到，**不等于业界没有**。
+- **经官方文档核实**：Mister Download Manager 的工具清单、协议与校验和；KGet、Motrix CLI、FluxDown 的存在与路线。
+- **代理转述、未逐条复核**：aria2 / qBittorrent / yt-dlp 的 MCP 包装现状，以及「无预检把系统盘撑满」的 issue。
+- 「抽样范围内没找到」只代表这次没找到，**不等于业界没有**。
 
-最对口的同类是 **MDM**：自带 MCP server，7 个工具（`list` / `add` / `pause` / `resume` / `remove` / `start_queue` / `stop_queue`），支持 http/https/ftp/ftps，支持 5 种校验和（MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32），但**自动化 API 默认关闭、需手动开启**（以上经官方文档核实）。
+下载类工具按「队列是谁的」可以分三档：
 
-我们的差异：
+| 项目 | 队列归属 | 与我们的差别 |
+|---|---|---|
+| Mister Download Manager | 它自己的（7 工具、5 种校验和） | 用户需要改用它 |
+| KGet / Motrix CLI | 它们自己的桌面应用 | 同上，agent 只是接入方 |
+| FluxDown | 它自己的引擎 + 内置 MCP | 协议面与我们持平（同样含 eD2K / HLS / DASH） |
+| aria2-mcp 系 | 另起一个 aria2 实例 | agent 与人的队列互不相干 |
+| **本插件** | **用户已经装着的 Ghost Downloader** | **不新增引擎、不迁移队列** |
 
-1. **8 个工具闭环**。相比 MDM 的 7 个，多出 `probe`（不建任务先看文件名与大小）、`wait`（同步等到结束）、`stats`（按状态汇总队列）、`doctor`（只读体检）。MDM 的 `start_queue` / `stop_queue` 我们没有对应的整体队列开关。
-2. **协议覆盖更宽**：除 http/https/ftp 外还支持 `magnet`、`ed2k`、`.torrent` URL、HLS、DASH 清单；MDM 是 http/https/ftp/ftps。
-3. **默认落点绑会话工作目录**。不传 `dir` 时落到 `<会话工作目录>/downloads`，目的就是「智能体下完还能读回」——**本次抽样范围内没有看到第二家这么做**。
-4. **预检只报告、不自动跳过**。`precheck` 给 blocked / skip / warn 的建议，决策权留给智能体。调研转述提到有项目因缺少预检把系统盘写满；我们选择报告而不代替决策，但这并不保证空间一定够。
-5. **同步 / 异步双模式**。默认立刻返回任务 id 并在后台监视、结束时主动通知；需要当场拿文件时用 `waitSeconds` 或 `ghost_wait` 同步等。调研转述称 MCP 的 tool 默认同步阻塞、长任务要靠 Tasks 扩展轮询与取消——若该转述成立，这一点上我们的调用方负担更轻。
-6. **校验和已补上，与 MDM 基本持平**：`checksum` 支持 md5 / sha1 / sha256 / sha512 共 **4 种**，MDM 是 5 种（多一个 CRC32）。**这项我们少一种，如实记录。**
+所以最实在的一条差异不是「功能更多」，而是**这个插件是适配器，不是下载器**：用户桌面上原本怎么用 Ghost，装完之后还是怎么用，只是多了一个智能体能代按按钮的入口；AI 发起的下载和人自己发起的下载在同一个队列里，界面上看得见、管得住。
 
-也必须诚实写出我们比 MDM 松的地方：
+相对 MDM 的具体差异（它是功能面最接近的一个）：
 
-- **MDM 的 magnet 会弹出「Add torrent」强制人工选文件**；本插件的智能体可以全自动提交 magnet 并用 `select` 自选文件。**我们的自动化程度更高，安全边界更松**。需要人工把关时，用 `controlRemoveEnabled`、`allowedUrlSchemes` 收紧，或在流程层要求人工确认。
+1. **8 个工具**。比 MDM 的 7 个多出 `probe`（不建任务先看大小）、`wait`（同步等到结束）、`stats`（按状态汇总）、`doctor`（只读体检）；MDM 的 `start_queue` / `stop_queue` 我们没有对应的整体队列开关。
+2. **协议面相对 MDM 更宽**：除 http/https/ftp 外还有 `magnet`、`ed2k`、`.torrent`、HLS、DASH。但 FluxDown 这类多协议下载器同样覆盖，**所以协议面不是本插件的独有优势**。
+3. **默认落点绑会话工作目录**：不传 `dir` 时落到 `<会话工作目录>/downloads`，目的是让智能体下完还能读回；这一条在本次抽样范围内没有见到第二家。
+4. **预检只报告、不自动跳过**：`precheck` 给出 blocked / skip / warn 的建议，决策权留给调用方。
+5. **同步 / 异步双模式**：默认立即返回任务 id、后台监视并在结束时通知；需要当场拿文件时用 `waitSeconds` 或 `ghost_wait`。
+6. **校验和 4 种，比 MDM 少一种**：我们有 md5 / sha1 / sha256 / sha512，MDM 多一个 CRC32。这一项如实记录为落后。
 
 ## 诊断
 
