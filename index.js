@@ -8,6 +8,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import * as nodeZlib from 'node:zlib';
 import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statfsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -841,31 +842,28 @@ function parseChecksum(raw) {
   };
 }
 
-/** Standard CRC-32 (IEEE 802.3, the zip one) lookup table, built once. */
-const CRC32_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i += 1) {
-    let c = i;
-    for (let bit = 0; bit < 8; bit += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[i] = c >>> 0;
-  }
-  return table;
-})();
-
-/** Stream a file through CRC-32; the digest is 8 hex characters. */
+/**
+ * Stream a file through CRC-32; the digest is 8 hex characters.
+ *
+ * `zlib.crc32` (Node >= 22.15) already implements the IEEE 802.3 variant that
+ * zip uses, and accepts the previous value so a file can be hashed chunk by
+ * chunk without building a hash object. Older runtimes get a clear error rather
+ * than a silently different number.
+ */
 async function crc32File(filePath) {
-  let crc = 0xffffffff;
+  if (typeof nodeZlib.crc32 !== 'function') {
+    throw new Error('CRC32 needs zlib.crc32 (Node >= 22.15); pass sha256 instead on this runtime.');
+  }
+  let crc = 0;
   await new Promise((resolve, reject) => {
     const stream = createReadStream(filePath);
     stream.on('data', (chunk) => {
-      for (let i = 0; i < chunk.length; i += 1) {
-        crc = CRC32_TABLE[(crc ^ chunk[i]) & 0xff] ^ (crc >>> 8);
-      }
+      crc = nodeZlib.crc32(chunk, crc);
     });
     stream.on('error', reject);
     stream.on('end', resolve);
   });
-  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0');
+  return (crc >>> 0).toString(16).padStart(8, '0');
 }
 
 /**

@@ -126,7 +126,7 @@ Against MDM specifically (the closest on features):
 3. **Default landing folder bound to the session workspace**: without `dir` the file lands in `<session cwd>/downloads`, so the agent can read it back afterwards. This was not found elsewhere in the sample.
 4. **Precheck reports, never skips**: `precheck` returns blocked / skip / warn advice and leaves the decision to the caller.
 5. **Both sync and async**: a submission returns task ids immediately and is watched in the background; `waitSeconds` or `ghost_wait` block when the file is needed right away.
-6. **Five checksums, level with MDM**: md5 / sha1 / sha256 / sha512 plus CRC32 — `node:crypto` does not provide it, so the plugin computes it with the IEEE 802.3 table that zip itself uses.
+6. **Five checksums, level with MDM**: md5 / sha1 / sha256 / sha512 plus CRC32 — `node:crypto` does not provide it, but `zlib.crc32` (Node >= 22.15) is exactly the IEEE 802.3 variant zip uses, so the runtime implementation does the work chunk by chunk.
 
 ## Diagnostics
 
