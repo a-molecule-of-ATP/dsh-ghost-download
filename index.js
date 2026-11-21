@@ -639,6 +639,64 @@ function workspaceDownloads(ctx, exec) {
  * @param ctx - tool registry.
  * @param config - optional `{ ghdPath }` row configuration.
  */
+/**
+ * Apply the same admission decision the host applies to its own `/api` routes.
+ *
+ * A plugin's exact route runs BEFORE the host's admission check (the plugin path is
+ * longer than `/api`), so without this call any web page open in the user's browser
+ * could fetch it. `connection.admit()` is the newer shape; older hosts expose
+ * `requestRejection()`. When neither is available the route fails CLOSED — an
+ * unauthenticated read is worse than a broken button.
+ *
+ * @param ctx - plugin context carrying the `connection` service.
+ * @param request - the Fetch request the route received (headers are preserved even
+ *   though it carries no Peer).
+ * @returns a rejection status, or `undefined` when the route may answer.
+ */
+function admitRequest(ctx, request) {
+  let connection;
+  try {
+    connection = ctx.get('connection');
+  } catch {
+    return 503;
+  }
+  if (connection === undefined || connection === null) return 503;
+  try {
+    if (typeof connection.admit === 'function') {
+      const admission = connection.admit(request);
+      if (admission !== null && typeof admission === 'object') {
+        if ('rejection' in admission) return admission.rejection;
+        if ('peer' in admission) return undefined;
+      }
+      return 503;
+    }
+    if (typeof connection.requestRejection === 'function') {
+      return connection.requestRejection(request) ?? undefined;
+    }
+  } catch {
+    return 503;
+  }
+  return 503;
+}
+
+/**
+ * The response a rejected request gets. The status is passed through so a caller can
+ * tell "not signed in" (401) from "not allowed from here" (403) from "no admission
+ * service" (503).
+ *
+ * @param status - rejection status from {@link admitRequest}.
+ * @returns a JSON response carrying the status.
+ */
+function rejectionResponse(status) {
+  const reason = status === 401 ? 'authentication required'
+    : status === 403 ? 'request rejected by the host admission check'
+      : 'admission unavailable';
+  return new Response(JSON.stringify({ error: reason }), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
 export function apply(ctx, config) {
   const pluginConfig = config && typeof config === 'object' ? config : {};
   /**
@@ -1300,7 +1358,11 @@ function protocolOf(url) {
     ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/plugin/ghost-download/tasks',
-      resource: async () => {
+      resource: async (request) => {
+        // This route runs before the host's own admission check, so it asks for the
+        // same decision instead of trusting whoever reached it.
+        const rejection = admitRequest(ctx, request);
+        if (rejection !== undefined) return rejectionResponse(rejection);
         if (Date.now() - snapshot.at > SNAPSHOT_TTL_MS) await readQueue();
         return new Response(JSON.stringify(snapshot.payload), {
           status: 200,
@@ -1315,6 +1377,10 @@ function protocolOf(url) {
       kind: 'exact',
       path: '/plugin/ghost-download/submissions',
       resource: async (request) => {
+        // Same admission fence as the snapshot route above; this one returns which
+        // downloads a session submitted, which is not something a stray page should see.
+        const rejection = admitRequest(ctx, request);
+        if (rejection !== undefined) return rejectionResponse(rejection);
         const url = new URL(request?.url ?? 'http://localhost/');
         const callId = url.searchParams.get('call') ?? '';
         const sessionId = url.searchParams.get('session') ?? '';
